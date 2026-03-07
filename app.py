@@ -1,0 +1,842 @@
+"""
+Omer Outreach Tool — CRM-Viewer + Kommentar-Generator für LinkedIn
+Omer kopiert Namen rein → App zeigt die Nachrichten aus Airtable in gleicher Reihenfolge.
+Omer postet einen LinkedIn-Post → App generiert passende Kommentare.
+
+Workflow: Koren generiert Nachrichten via /omer Skill (Claude) → Airtable → Omer öffnet diese App
+
+Usage: streamlit run execution/omer_app.py
+"""
+
+import streamlit as st
+import json
+import ssl
+import urllib.request
+import urllib.parse
+import os
+import re
+import base64
+
+# --- Config ---
+# Support both .env (local) and Streamlit secrets (cloud)
+def get_secret(key, default=""):
+    # 1. Streamlit secrets (cloud deployment)
+    try:
+        return st.secrets[key]
+    except Exception:
+        pass
+    # 2. Environment variable
+    val = os.getenv(key, "")
+    if val:
+        return val
+    # 3. Try loading .env file (local only)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+        return os.getenv(key, default)
+    except ImportError:
+        return default
+
+
+AIRTABLE_TOKEN = get_secret("AIRTABLE_API_TOKEN")
+BASE_ID = "appz5XrcUwpc6NnG5"
+TABLE_ID = "tblsrlDRFtnLPimP6"
+GEMINI_API_KEY = get_secret("GEMINI_API_KEY")
+
+try:
+    import certifi
+    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CTX = ssl.create_default_context()
+
+
+# --- Airtable Helpers ---
+
+def airtable_request(method, path, data=None):
+    url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}{path}"
+    body = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Authorization", f"Bearer {AIRTABLE_TOKEN}")
+    if body:
+        req.add_header("Content-Type", "application/json")
+    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=30)
+    return json.loads(resp.read())
+
+
+def update_lead_in_airtable(record_id, fields):
+    url = f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}/{record_id}"
+    body = json.dumps({"fields": fields}).encode()
+    req = urllib.request.Request(url, data=body, method="PATCH")
+    req.add_header("Authorization", f"Bearer {AIRTABLE_TOKEN}")
+    req.add_header("Content-Type", "application/json")
+    urllib.request.urlopen(req, context=SSL_CTX, timeout=30)
+
+
+def mark_as_sent(record_id):
+    update_lead_in_airtable(record_id, {"Nachricht Status": "Gesendet"})
+
+
+def get_all_leads_with_messages():
+    """Load all leads that have a personalized message."""
+    formula = 'NOT({Personalisierte Nachricht}=BLANK())'
+    all_records = []
+    offset = None
+    while True:
+        params = [
+            ("filterByFormula", formula),
+            ("fields[]", "Name"), ("fields[]", "Vorname"), ("fields[]", "Nachname"),
+            ("fields[]", "Firma"), ("fields[]", "Position"),
+            ("fields[]", "Personalisierte Nachricht"), ("fields[]", "Nachricht Status"),
+            ("pageSize", "100"),
+        ]
+        if offset:
+            params.append(("offset", offset))
+        result = airtable_request("GET", f"?{urllib.parse.urlencode(params)}")
+        all_records.extend(result.get("records", []))
+        offset = result.get("offset")
+        if not offset:
+            break
+    return all_records
+
+
+def get_stats():
+    all_records = []
+    offset = None
+    while True:
+        params = [("fields[]", "Nachricht Status"), ("pageSize", "100")]
+        if offset:
+            params.append(("offset", offset))
+        result = airtable_request("GET", f"?{urllib.parse.urlencode(params)}")
+        all_records.extend(result.get("records", []))
+        offset = result.get("offset")
+        if not offset:
+            break
+    stats = {"Gesamt": len(all_records), "Entwurf": 0, "Zugewiesen": 0, "Gesendet": 0, "Beantwortet": 0}
+    for r in all_records:
+        status = r.get("fields", {}).get("Nachricht Status", "")
+        if status in stats:
+            stats[status] += 1
+    return stats
+
+
+def parse_names_from_text(text):
+    """Extract names from pasted LinkedIn connections text."""
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    names = []
+    skip_words = {"ago", "day", "days", "week", "weeks", "month", "months", "year", "years",
+                  "connected", "mutual", "connection", "connections", "message", "pending",
+                  "follow", "remove", "more", "degree", "1st", "2nd", "3rd"}
+
+    for line in lines:
+        lower = line.lower().strip()
+        if any(lower.startswith(w) for w in skip_words):
+            continue
+        if re.match(r'^\d+', lower):
+            continue
+        if len(lower) < 3:
+            continue
+
+        name = re.split(r'[,|·•\-–—]', line)[0].strip()
+        words = name.split()
+        if len(words) > 4:
+            name = " ".join(words[:3])
+        if len(words) >= 2 and len(name) >= 3:
+            names.append(name)
+
+    return names
+
+
+def match_names_to_leads(names, all_leads):
+    """Match pasted names to Airtable records. Return in same order as names."""
+    lookup = {}
+    for rec in all_leads:
+        f = rec.get("fields", {})
+        full_name = f.get("Name", "").strip().lower()
+        nachname = f.get("Nachname", "").strip().lower()
+        vorname = f.get("Vorname", "").strip().lower()
+        if full_name:
+            lookup[full_name] = rec
+        if nachname:
+            if nachname not in lookup:
+                lookup[nachname] = rec
+        if vorname and nachname:
+            lookup[f"{vorname} {nachname}"] = rec
+
+    matched = []
+    not_found = []
+
+    for name in names:
+        name_lower = name.lower().strip()
+        found = None
+
+        if name_lower in lookup:
+            found = lookup[name_lower]
+
+        if not found:
+            for key, rec in lookup.items():
+                rec_name = rec.get("fields", {}).get("Name", "").lower()
+                if name_lower in rec_name or rec_name in name_lower:
+                    found = rec
+                    break
+                name_parts = name_lower.split()
+                if len(name_parts) >= 2 and name_parts[-1] == key:
+                    found = rec
+                    break
+
+        if found:
+            matched.append({"name": name, "record": found})
+        else:
+            not_found.append(name)
+
+    return matched, not_found
+
+
+# --- Gemini API (for screenshots AND comment generation) ---
+
+def gemini_request(prompt, image_bytes=None, media_type="image/png", max_tokens=2000, temperature=0.2):
+    """Universal Gemini API call — works for text-only and image+text."""
+    if not GEMINI_API_KEY:
+        return None, "GEMINI_API_KEY nicht gesetzt"
+
+    parts = []
+    if image_bytes:
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        parts.append({
+            "inline_data": {
+                "mime_type": media_type,
+                "data": b64_image,
+            },
+        })
+    parts.append({"text": prompt})
+
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+        },
+    }
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=90)
+        result = json.loads(resp.read())
+        candidates = result.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = parts[0].get("text", "") if parts else ""
+            return text, None
+        return None, "Keine Antwort von Gemini"
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")[:300]
+        return None, f"Gemini API Fehler {e.code}: {body}"
+    except Exception as e:
+        return None, str(e)
+
+
+def get_media_type(filename):
+    ext = os.path.splitext(filename or "")[1].lower()
+    return {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(ext, "image/png")
+
+
+SCREENSHOT_PROMPT_NAMES = """Analysiere diesen LinkedIn-Screenshot.
+Extrahiere ALLE Personen-Namen die du siehst.
+
+Fuer JEDE Person gib aus:
+- Name (Vor- und Nachname)
+- Position/Headline (falls sichtbar)
+- Firma (falls sichtbar)
+
+Format (eine Person pro Zeile):
+Name | Position | Firma
+
+Gib NUR die Liste aus, nichts anderes. Wenn du keine Namen findest, schreib "KEINE NAMEN GEFUNDEN"."""
+
+SCREENSHOT_PROMPT_POST = """Analysiere diesen LinkedIn-Post Screenshot.
+
+Extrahiere:
+1. POSTER_NAME: Wer hat den Post geschrieben? (Vor- und Nachname)
+2. POSTER_HEADLINE: Was steht unter dem Namen? (Position, Firma etc.)
+3. POST_TEXT: Der komplette Text des Posts
+
+Format (genau so):
+POSTER_NAME: [Name]
+POSTER_HEADLINE: [Headline]
+POST_TEXT:
+[Der komplette Post-Text]
+
+Gib NUR diese Infos aus, nichts anderes."""
+
+
+def parse_names_from_screenshot(analysis_text):
+    if not analysis_text or "KEINE NAMEN" in analysis_text:
+        return []
+    names = []
+    for line in analysis_text.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if parts and len(parts[0].split()) >= 2:
+            names.append(parts[0].strip())
+    return names
+
+
+def parse_post_from_screenshot(analysis_text):
+    result = {"name": "", "headline": "", "text": ""}
+    if not analysis_text:
+        return result
+
+    lines = analysis_text.strip().split("\n")
+    in_post_text = False
+    post_lines = []
+
+    for line in lines:
+        if line.startswith("POSTER_NAME:"):
+            result["name"] = line.replace("POSTER_NAME:", "").strip()
+        elif line.startswith("POSTER_HEADLINE:"):
+            result["headline"] = line.replace("POSTER_HEADLINE:", "").strip()
+        elif line.startswith("POST_TEXT:"):
+            in_post_text = True
+        elif in_post_text:
+            post_lines.append(line)
+
+    result["text"] = "\n".join(post_lines).strip()
+    return result
+
+
+# --- Comment Generator ---
+
+def find_lead_by_name(name):
+    """Search Airtable for a lead by name."""
+    parts = name.strip().split()
+    if not parts:
+        return None
+    nachname = parts[-1]
+    formula = f'FIND(LOWER("{nachname}"), LOWER({{Name}}))'
+    fields = [
+        "Name", "Vorname", "Nachname", "Position", "Firma", "Branche",
+        "Firmenbeschreibung", "Nachricht Status", "Conversation Status",
+        "Wie wir helfen koennen",
+    ]
+    params = urllib.parse.urlencode(
+        [("filterByFormula", formula)] + [("fields[]", f) for f in fields]
+    )
+    try:
+        result = airtable_request("GET", f"?{params}")
+        if result and result.get("records"):
+            return result["records"][0]
+    except Exception:
+        pass
+    return None
+
+
+def classify_poster(name, airtable_record=None, poster_info=""):
+    if airtable_record:
+        status = airtable_record.get("fields", {}).get("Conversation Status", "")
+        if status in ("Termin", "Abschluss", "Kunde"):
+            return "KUNDE"
+        return "PROSPECT"
+
+    info_lower = (poster_info + " " + name).lower()
+    influencer_signals = [
+        "creator", "influencer", "thought leader", "keynote",
+        "bestselling author", "top voice", "linkedin top",
+        "speaker", "100k", "50k", "followers",
+    ]
+    if any(s in info_lower for s in influencer_signals):
+        return "INFLUENCER"
+
+    peer_signals = [
+        "videoproduktion", "filmproduktion", "content creator",
+        "videoagentur", "kreativagentur", "werbefilm", "imagefilm",
+        "videographer", "filmmaker", "regisseur", "kameramann",
+        "marketing agentur", "social media agentur",
+    ]
+    if any(s in info_lower for s in peer_signals):
+        return "PEER"
+
+    return "UNKNOWN"
+
+
+CATEGORY_LABELS = {
+    "PROSPECT": ("Prospect (Potentieller Kunde)", "🎯"),
+    "INFLUENCER": ("Influencer", "⭐"),
+    "PEER": ("Branchenkollege", "🤝"),
+    "KUNDE": ("Bestehender Kontakt", "💼"),
+    "UNKNOWN": ("Unbekannt", "❓"),
+}
+
+
+def build_comment_prompt(post_text, poster_name, category, lead_data=None):
+    lead_context = ""
+    if lead_data:
+        f = lead_data.get("fields", {})
+        lead_context = f"""
+LEAD-DATEN (Person ist ein PROSPECT in unserem CRM):
+- Position: {f.get('Position', '?')}
+- Firma: {f.get('Firma', '?')}
+- Branche: {f.get('Branche', '?')}
+- Firmeninfo: {f.get('Firmenbeschreibung', '?')[:300]}
+- Wie wir helfen koennen: {f.get('Wie wir helfen koennen', '?')[:200]}
+"""
+
+    category_instructions = {
+        "PROSPECT": """KATEGORIE: PROSPECT (potentieller Kunde!)
+ZIEL: Expertise zeigen, Vertrauen aufbauen, im Kopf bleiben. KEIN Pitch!
+BESTE FORMELN:
+1. Pain Point Mirror -- zeig dass du das Problem kennst
+2. Qualification Question -- stelle eine kluge Fachfrage
+3. Specific Experience -- teile eine relevante Erfahrung/Zahl
+WICHTIG: Das ist ein Warm-Up VOR oder NACH der Vernetzung. Sei hilfreich, nicht verkaeufisch.""",
+        "INFLUENCER": """KATEGORIE: INFLUENCER (grosse Reichweite)
+ZIEL: Sichtbarkeit bei deren Publikum, zeig dass du Ahnung hast
+BESTE FORMELN:
+1. Authority Builder -- ergaenze mit Gegen-Position + Daten/Erfahrung
+2. Counter-Intuitive Insight -- widersprich respektvoll mit eigener Perspektive
+3. Metric Challenge -- fuehre eine fortgeschrittene Metrik/Frage ein
+WICHTIG: Hier lesen viele Prospects mit. Dein Kommentar ist deine Visitenkarte.""",
+        "PEER": """KATEGORIE: PEER (Branchenkollege)
+ZIEL: Netzwerk staerken, gegenseitige Sichtbarkeit
+BESTE FORMELN:
+1. Relationship Builder -- zeig dass du ihren Content verfolgst
+2. Curiosity Driver -- starte eine echte Diskussion
+WICHTIG: Kollegial, auf Augenhoehe. Kein Wettbewerb.""",
+        "KUNDE": """KATEGORIE: BESTEHENDER KUNDE/KONTAKT
+ZIEL: Beziehung pflegen, Top-of-Mind bleiben
+BESTE FORMELN:
+1. Value Demonstrator -- sofortigen Mehrwert liefern
+2. DM Bridge -- Kommentar als Bruecke zu Privatnachricht
+WICHTIG: Warm, persoenlich, wie ein Freund der kommentiert.""",
+        "UNKNOWN": """KATEGORIE: UNBEKANNT
+ZIEL: Mehrwert liefern, Expertise zeigen
+BESTE FORMELN:
+1. Specific Experience -- teile eine relevante Erfahrung
+2. Curiosity Driver -- stelle eine neugierige Frage
+WICHTIG: Generisch hilfreich, zeig Fachwissen aus dem Video/Content Bereich.""",
+    }
+
+    return f"""Du bist Koren von Film-labor. Du kommentierst grade einen LinkedIn-Post am Handy.
+
+POSTER: {poster_name}
+{category_instructions.get(category, category_instructions['UNKNOWN'])}
+
+{lead_context}
+
+DER POST (Inhalt):
+---
+{post_text[:2000]}
+---
+
+GENERIERE GENAU 3 KOMMENTAR-OPTIONEN. Jede Option ist ein anderer Ansatz.
+
+KOMMENTAR-REGELN:
+- 40-120 Woerter (optimal fuer LinkedIn Algorithmus)
+- Spezifisch auf den Post eingehen (NIE generisch)
+- Mit einer Frage enden (foerdert Antwort + Sichtbarkeit)
+- Branchenspezifische Sprache nutzen wo passend
+- Eigene Erfahrung/Daten teilen wenn moeglich
+- Professionell aber menschlich (kein Corporate-Deutsch)
+- ECHTE Umlaute verwenden
+- Keine Emojis oder maximal 1 dezentes
+- KEIN "Toller Beitrag!", "Danke fuers Teilen!", "100% agree!"
+- KEIN Link oder Eigenwerbung
+- KEIN Pitch oder Verkauf
+
+FORMAT (genau so, nichts anderes):
+
+OPTION A | [Formel-Name]
+[Der Kommentar]
+
+OPTION B | [Formel-Name]
+[Der Kommentar]
+
+OPTION C | [Formel-Name]
+[Der Kommentar]
+
+Gib NUR die 3 Optionen aus. Nix davor nix danach."""
+
+
+def generate_comments(prompt):
+    """Generate comments via Gemini API (free, cloud-compatible)."""
+    return gemini_request(prompt, max_tokens=1500, temperature=0.7)
+
+
+def parse_comment_options(raw_text):
+    options = []
+    parts = re.split(r'OPTION\s+([A-C])\s*\|\s*', raw_text)
+    i = 1
+    while i < len(parts) - 1:
+        label = parts[i].strip()
+        content = parts[i + 1].strip()
+        lines = content.split("\n", 1)
+        formula = lines[0].strip() if lines else ""
+        comment = lines[1].strip() if len(lines) > 1 else content
+        comment = comment.strip()
+        options.append({
+            "label": f"Option {label}",
+            "formula": formula,
+            "comment": comment,
+        })
+        i += 2
+    return options
+
+
+# --- UI ---
+
+st.set_page_config(page_title="Omer Tool", page_icon="💬", layout="centered")
+
+st.markdown("""
+<style>
+    .message-box {
+        background: #f0f2f6;
+        border-radius: 12px;
+        padding: 16px;
+        margin: 8px 0;
+    }
+    .lead-name {
+        font-weight: bold;
+        font-size: 18px;
+    }
+    .lead-info {
+        color: #666;
+        font-size: 14px;
+        margin-top: 2px;
+    }
+    .sent-badge {
+        background: #d4edda;
+        color: #155724;
+        border-radius: 5px;
+        padding: 3px 10px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    .skip-badge {
+        background: #fff3cd;
+        color: #856404;
+        border-radius: 5px;
+        padding: 3px 10px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    .notfound-badge {
+        background: #f8d7da;
+        color: #721c24;
+        border-radius: 5px;
+        padding: 3px 10px;
+        font-size: 12px;
+    }
+    div[data-testid="stCodeBlock"] {
+        font-size: 16px !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Navigation
+page = st.sidebar.radio("", ["Nachrichten senden", "Kommentar", "Stats"], index=0)
+
+if page == "Nachrichten senden":
+    st.title("💬 Nachrichten senden")
+    st.caption("Namen eingeben ODER Screenshot hochladen")
+
+    input_tab1, input_tab2 = st.tabs(["Text eingeben", "Screenshot"])
+
+    with input_tab1:
+        text_input = st.text_area(
+            "Namen einfügen",
+            placeholder="Max Mueller\nAnna Schmidt\nJohn Doe\n\nOder direkt von LinkedIn kopieren...",
+            height=200,
+            key="names_input",
+        )
+
+        if st.button("Nachrichten laden", type="primary", use_container_width=True, key="btn_text_load"):
+            if text_input.strip():
+                with st.spinner("Lade Nachrichten aus CRM..."):
+                    names = parse_names_from_text(text_input)
+                    if not names:
+                        st.warning("Keine Namen erkannt. Bitte Namen eingeben (ein Name pro Zeile).")
+                    else:
+                        all_leads = get_all_leads_with_messages()
+                        matched, not_found = match_names_to_leads(names, all_leads)
+                        st.session_state["matched"] = matched
+                        st.session_state["not_found"] = not_found
+                        st.session_state["names_count"] = len(names)
+            else:
+                st.warning("Bitte Namen einfügen.")
+
+    with input_tab2:
+        screenshot = st.file_uploader(
+            "Screenshot hochladen",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="names_screenshot",
+            help="LinkedIn Connections-Liste oder Profil-Screenshot",
+        )
+        if screenshot:
+            st.image(screenshot, caption="Hochgeladener Screenshot", use_container_width=True)
+
+        if st.button("Namen aus Screenshot erkennen", type="primary", use_container_width=True, key="btn_screenshot_load"):
+            if screenshot:
+                with st.spinner("Analysiere Screenshot mit AI..."):
+                    image_bytes = screenshot.getvalue()
+                    media_type = get_media_type(screenshot.name)
+                    analysis, error = gemini_request(
+                        SCREENSHOT_PROMPT_NAMES, image_bytes, media_type
+                    )
+                    if error:
+                        st.error(f"Fehler: {error}")
+                    elif analysis:
+                        names = parse_names_from_screenshot(analysis)
+                        if not names:
+                            st.warning("Keine Namen im Screenshot erkannt.")
+                            with st.expander("AI-Analyse anzeigen"):
+                                st.text(analysis)
+                        else:
+                            st.success(f"{len(names)} Namen erkannt: {', '.join(names)}")
+                            with st.spinner("Lade Nachrichten aus CRM..."):
+                                all_leads = get_all_leads_with_messages()
+                                matched, not_found = match_names_to_leads(names, all_leads)
+                                st.session_state["matched"] = matched
+                                st.session_state["not_found"] = not_found
+                                st.session_state["names_count"] = len(names)
+            else:
+                st.warning("Bitte erst einen Screenshot hochladen.")
+
+    # Show results
+    if st.session_state.get("matched") is not None:
+        matched = st.session_state["matched"]
+        not_found = st.session_state.get("not_found", [])
+        total = st.session_state.get("names_count", 0)
+
+        st.markdown(f"**{len(matched)} von {total} gefunden**")
+
+        if not_found:
+            with st.expander(f"Nicht gefunden ({len(not_found)})"):
+                for nf in not_found:
+                    st.markdown(f'<span class="notfound-badge">{nf}</span> ', unsafe_allow_html=True)
+                st.caption("Diese Namen haben noch keine Nachricht im CRM. Sag Koren Bescheid.")
+
+        sent_count = 0
+        for i, item in enumerate(matched):
+            rec = item["record"]
+            f = rec.get("fields", {})
+            name = f.get("Name", item["name"])
+            vorname = f.get("Vorname", name.split()[0] if name else "")
+            firma = f.get("Firma", "")
+            position = f.get("Position", "")
+            msg = f.get("Personalisierte Nachricht", "")
+            status = f.get("Nachricht Status", "")
+            rec_id = rec["id"]
+
+            info_parts = [p for p in [position, firma] if p]
+
+            if status == "Gesendet":
+                st.markdown(f"""<div class="message-box">
+<div class="lead-name">{i+1}. {name} <span class="sent-badge">SCHON GESENDET</span></div>
+<div class="lead-info">{' | '.join(info_parts)}</div>
+</div>""", unsafe_allow_html=True)
+                sent_count += 1
+                continue
+
+            if not msg or len(msg) < 5:
+                st.markdown(f"""<div class="message-box">
+<div class="lead-name">{i+1}. {name} <span class="skip-badge">KEINE NACHRICHT</span></div>
+<div class="lead-info">{' | '.join(info_parts)}</div>
+</div>""", unsafe_allow_html=True)
+                continue
+
+            st.markdown(f"""<div class="message-box">
+<div class="lead-name">{i+1}. {name}</div>
+<div class="lead-info">{' | '.join(info_parts)}</div>
+</div>""", unsafe_allow_html=True)
+
+            st.code(msg, language=None)
+
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.caption(f"Kopieren → an {vorname} senden")
+            with col2:
+                if st.button("Gesendet ✓", key=f"sent_{rec_id}", use_container_width=True):
+                    try:
+                        mark_as_sent(rec_id)
+                        for m in st.session_state["matched"]:
+                            if m["record"]["id"] == rec_id:
+                                m["record"]["fields"]["Nachricht Status"] = "Gesendet"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Fehler: {e}")
+
+            st.divider()
+
+        if sent_count > 0:
+            st.info(f"{sent_count} davon bereits gesendet")
+
+
+elif page == "Kommentar":
+    st.title("💬 Kommentar-Generator")
+    st.caption("Post einfügen ODER Screenshot hochladen → 3 Kommentar-Optionen")
+
+    comment_tab1, comment_tab2 = st.tabs(["Text eingeben", "Screenshot"])
+
+    with comment_tab1:
+        col_name, col_info = st.columns(2)
+        with col_name:
+            poster_name = st.text_input(
+                "Wer hat gepostet?",
+                placeholder="Max Mueller",
+                key="poster_name",
+            )
+        with col_info:
+            poster_info = st.text_input(
+                "Headline (optional)",
+                placeholder="CEO bei Firma XY, Top Voice...",
+                key="poster_info",
+            )
+
+        post_text = st.text_area(
+            "Post-Text einfügen",
+            placeholder="Den LinkedIn-Post hier reinkopieren...",
+            height=200,
+            key="post_text",
+        )
+
+        if st.button("Kommentare generieren", type="primary", use_container_width=True, key="btn_comment_text"):
+            if not post_text.strip():
+                st.warning("Bitte Post-Text einfügen.")
+            elif not poster_name.strip():
+                st.warning("Bitte den Namen des Posters eingeben.")
+            else:
+                with st.spinner("Checke CRM + generiere Kommentare..."):
+                    record = find_lead_by_name(poster_name)
+                    category = classify_poster(poster_name, record, poster_info)
+                    cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
+
+                    if record:
+                        f = record.get("fields", {})
+                        st.info(f"{cat_emoji} **{cat_label}** — {f.get('Firma', '')} | {f.get('Position', '')}")
+                    else:
+                        st.info(f"{cat_emoji} **{cat_label}**")
+
+                    prompt = build_comment_prompt(post_text, poster_name, category, record)
+                    raw_result, error = generate_comments(prompt)
+
+                    if error:
+                        st.error(f"Fehler: {error}")
+                    elif raw_result:
+                        options = parse_comment_options(raw_result)
+                        st.session_state["comment_options"] = options
+                        st.session_state["comment_raw"] = raw_result
+                        st.session_state["comment_category"] = category
+                    else:
+                        st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
+
+    with comment_tab2:
+        post_screenshot = st.file_uploader(
+            "Post-Screenshot hochladen",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="post_screenshot",
+            help="Screenshot eines LinkedIn-Posts",
+        )
+        if post_screenshot:
+            st.image(post_screenshot, caption="Hochgeladener Post", use_container_width=True)
+
+        if st.button("Kommentare aus Screenshot generieren", type="primary", use_container_width=True, key="btn_comment_screenshot"):
+            if post_screenshot:
+                with st.spinner("Analysiere Screenshot..."):
+                    image_bytes = post_screenshot.getvalue()
+                    media_type = get_media_type(post_screenshot.name)
+                    analysis, error = gemini_request(
+                        SCREENSHOT_PROMPT_POST, image_bytes, media_type
+                    )
+                    if error:
+                        st.error(f"Screenshot-Analyse Fehler: {error}")
+                    elif analysis:
+                        post_info = parse_post_from_screenshot(analysis)
+                        extracted_name = post_info["name"]
+                        extracted_headline = post_info["headline"]
+                        extracted_text = post_info["text"]
+
+                        if not extracted_text:
+                            st.warning("Konnte keinen Post-Text im Screenshot erkennen.")
+                            with st.expander("AI-Analyse anzeigen"):
+                                st.text(analysis)
+                        else:
+                            st.success(f"Erkannt: **{extracted_name}** — {extracted_headline}")
+                            with st.expander("Erkannter Post-Text"):
+                                st.text(extracted_text)
+
+                            with st.spinner("Checke CRM + generiere Kommentare..."):
+                                record = find_lead_by_name(extracted_name) if extracted_name else None
+                                category = classify_poster(extracted_name or "", record, extracted_headline)
+                                cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
+
+                                if record:
+                                    f = record.get("fields", {})
+                                    st.info(f"{cat_emoji} **{cat_label}** — {f.get('Firma', '')} | {f.get('Position', '')}")
+                                else:
+                                    st.info(f"{cat_emoji} **{cat_label}**")
+
+                                prompt = build_comment_prompt(extracted_text, extracted_name or "Unbekannt", category, record)
+                                raw_result, error = generate_comments(prompt)
+
+                                if error:
+                                    st.error(f"Fehler: {error}")
+                                elif raw_result:
+                                    options = parse_comment_options(raw_result)
+                                    st.session_state["comment_options"] = options
+                                    st.session_state["comment_raw"] = raw_result
+                                    st.session_state["comment_category"] = category
+                                else:
+                                    st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
+            else:
+                st.warning("Bitte erst einen Screenshot hochladen.")
+
+    # Show comment results
+    if st.session_state.get("comment_options"):
+        options = st.session_state["comment_options"]
+
+        if options:
+            for opt in options:
+                st.markdown(f"""<div class="message-box">
+<div class="lead-name">{opt['label']} | {opt['formula']}</div>
+</div>""", unsafe_allow_html=True)
+                st.code(opt["comment"], language=None)
+                st.caption("Kopieren → als Kommentar posten")
+                st.divider()
+        else:
+            st.markdown("**Kommentar-Optionen:**")
+            st.code(st.session_state.get("comment_raw", ""), language=None)
+
+        if st.button("Neue Kommentare", use_container_width=True):
+            st.session_state["comment_options"] = None
+            st.session_state["comment_raw"] = None
+            st.rerun()
+
+
+elif page == "Stats":
+    st.title("📊 Stats")
+
+    if st.button("Stats laden", type="primary", use_container_width=True):
+        with st.spinner("Lade..."):
+            stats = get_stats()
+
+        col1, col2 = st.columns(2)
+        col1.metric("Gesamt Leads", stats["Gesamt"])
+        col2.metric("Offen (Entwurf)", stats["Entwurf"])
+
+        col3, col4 = st.columns(2)
+        col3.metric("Gesendet", stats["Gesendet"])
+        col4.metric("Beantwortet", stats["Beantwortet"])
+
+        if stats["Gesamt"] > 0:
+            done = stats["Gesendet"] + stats["Beantwortet"]
+            pct = round(done / stats["Gesamt"] * 100)
+            st.progress(pct / 100, text=f"{pct}% verarbeitet ({done}/{stats['Gesamt']})")
