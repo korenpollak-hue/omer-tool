@@ -276,6 +276,52 @@ POST_TEXT:
 
 Gib NUR diese Infos aus, nichts anderes."""
 
+SCREENSHOT_PROMPT_MULTI_POST = """Analysiere diesen LinkedIn-Feed Screenshot. Es koennen MEHRERE Posts sichtbar sein.
+
+Fuer JEDEN sichtbaren Post extrahiere:
+1. POSTER_NAME: Wer hat den Post geschrieben?
+2. POSTER_HEADLINE: Position/Firma unter dem Namen
+3. POST_TEXT: Der Text des Posts (so viel wie sichtbar)
+
+Format (genau so, fuer JEDEN Post):
+---POST---
+POSTER_NAME: [Name]
+POSTER_HEADLINE: [Headline]
+POST_TEXT:
+[Post-Text]
+
+Trenne jeden Post mit ---POST---. Gib NUR die Posts aus, nichts anderes.
+Wenn nur 1 Post sichtbar ist, gib nur den einen aus."""
+
+
+def parse_multi_posts_from_screenshot(analysis_text):
+    """Parse multiple posts from feed screenshot analysis."""
+    if not analysis_text:
+        return []
+    posts = []
+    chunks = analysis_text.split("---POST---")
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        post = {"name": "", "headline": "", "text": ""}
+        lines = chunk.split("\n")
+        in_post_text = False
+        post_lines = []
+        for line in lines:
+            if line.startswith("POSTER_NAME:"):
+                post["name"] = line.replace("POSTER_NAME:", "").strip()
+            elif line.startswith("POSTER_HEADLINE:"):
+                post["headline"] = line.replace("POSTER_HEADLINE:", "").strip()
+            elif line.startswith("POST_TEXT:"):
+                in_post_text = True
+            elif in_post_text:
+                post_lines.append(line)
+        post["text"] = "\n".join(post_lines).strip()
+        if post["text"] and post["name"]:
+            posts.append(post)
+    return posts
+
 
 def parse_names_from_screenshot(analysis_text):
     if not analysis_text or "KEINE NAMEN" in analysis_text:
@@ -902,68 +948,87 @@ if page == "Nachrichten senden":
 
 elif page == "Kommentar":
     st.title("💬 Kommentar-Generator")
-    st.caption("Screenshot oder Post-Text einfuegen → 3 Kommentar-Optionen")
+    st.caption("Screenshots hochladen → Kommentare fuer alle Posts auf einmal")
 
-    # Screenshot upload — supports drag & drop, file picker, and browse
-    post_screenshot = st.file_uploader(
-        "Screenshot hier reinziehen oder auswaehlen",
+    # Multiple screenshot upload
+    post_screenshots = st.file_uploader(
+        "Screenshots hier reinziehen (einzeln oder mehrere)",
         type=["png", "jpg", "jpeg", "webp"],
-        key="post_screenshot",
-        help="Screenshot eines LinkedIn-Posts — per Drag & Drop, Datei auswaehlen oder Copy-Paste",
-        label_visibility="visible",
+        key="post_screenshots",
+        help="1 oder mehrere Screenshots von LinkedIn-Posts — Drag & Drop oder auswaehlen",
+        accept_multiple_files=True,
     )
 
-    if post_screenshot:
-        st.image(post_screenshot, caption="Hochgeladener Post", use_container_width=True)
+    if post_screenshots:
+        for img in post_screenshots:
+            st.image(img, caption=img.name, use_container_width=True, width=300)
 
-        if st.button("Kommentare generieren", type="primary", use_container_width=True, key="btn_comment_screenshot"):
-            with st.spinner("Analysiere Screenshot + generiere Kommentare..."):
-                image_bytes = post_screenshot.getvalue()
-                media_type = get_media_type(post_screenshot.name)
-                analysis, error = gemini_request(
-                    SCREENSHOT_PROMPT_POST, image_bytes, media_type
-                )
-                if error:
-                    st.error(f"Screenshot-Analyse Fehler: {error}")
-                elif analysis:
-                    post_info = parse_post_from_screenshot(analysis)
-                    extracted_name = post_info["name"]
-                    extracted_headline = post_info["headline"]
-                    extracted_text = post_info["text"]
+        if st.button("Kommentare fuer alle generieren", type="primary", use_container_width=True, key="btn_comment_batch"):
+            all_batch_results = []
 
-                    if not extracted_text:
-                        st.warning("Konnte keinen Post-Text im Screenshot erkennen.")
+            for idx, screenshot in enumerate(post_screenshots):
+                st.markdown(f"---")
+                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(post_screenshots)}..."):
+                    image_bytes = screenshot.getvalue()
+                    media_type = get_media_type(screenshot.name)
+
+                    # Use multi-post prompt to catch feed screenshots with multiple posts
+                    analysis, error = gemini_request(
+                        SCREENSHOT_PROMPT_MULTI_POST, image_bytes, media_type
+                    )
+                    if error:
+                        st.error(f"Screenshot {idx+1} Fehler: {error}")
+                        continue
+                    if not analysis:
+                        st.warning(f"Screenshot {idx+1}: Nichts erkannt")
+                        continue
+
+                    posts = parse_multi_posts_from_screenshot(analysis)
+                    if not posts:
+                        # Fallback: try single post parser
+                        post_info = parse_post_from_screenshot(analysis)
+                        if post_info["text"]:
+                            posts = [post_info]
+
+                    if not posts:
+                        st.warning(f"Screenshot {idx+1}: Kein Post erkannt")
                         with st.expander("AI-Analyse anzeigen"):
                             st.text(analysis)
-                    else:
-                        st.success(f"Erkannt: **{extracted_name}** — {extracted_headline}")
-                        with st.expander("Erkannter Post-Text"):
-                            st.text(extracted_text)
+                        continue
 
-                        record = find_lead_by_name(extracted_name) if extracted_name else None
-                        category = classify_poster(extracted_name or "", record, extracted_headline)
-                        cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
+                    for post in posts:
+                        pname = post["name"]
+                        pheadline = post["headline"]
+                        ptext = post["text"]
 
-                        if record:
-                            f = record.get("fields", {})
-                            st.info(f"{cat_emoji} **{cat_label}** — {f.get('Firma', '')} | {f.get('Position', '')}")
-                        else:
-                            st.info(f"{cat_emoji} **{cat_label}**")
+                        with st.spinner(f"Generiere Kommentar fuer {pname}..."):
+                            record = find_lead_by_name(pname) if pname else None
+                            category = classify_poster(pname or "", record, pheadline)
+                            cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
 
-                        prompt = build_comment_prompt(extracted_text, extracted_name or "Unbekannt", category, record)
-                        raw_result, error = generate_comments(prompt)
+                            prompt = build_comment_prompt(ptext, pname or "Unbekannt", category, record)
+                            raw_result, gen_error = generate_comments(prompt)
 
-                        if error:
-                            st.error(f"Fehler: {error}")
-                        elif raw_result:
+                            if gen_error or not raw_result:
+                                st.error(f"Fehler bei {pname}: {gen_error}")
+                                continue
+
                             options = parse_comment_options(raw_result)
-                            st.session_state["comment_options"] = options
-                            st.session_state["comment_raw"] = raw_result
-                            st.session_state["comment_category"] = category
-                        else:
-                            st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
+                            all_batch_results.append({
+                                "name": pname,
+                                "headline": pheadline,
+                                "category": category,
+                                "cat_label": cat_label,
+                                "cat_emoji": cat_emoji,
+                                "record": record,
+                                "options": options,
+                                "raw": raw_result,
+                            })
 
-    # Alternative: text input (expandable)
+            if all_batch_results:
+                st.session_state["batch_comments"] = all_batch_results
+
+    # Alternative: text input
     with st.expander("Oder: Post-Text manuell einfuegen"):
         poster_name = st.text_input(
             "Wer hat gepostet? (optional)",
@@ -992,12 +1057,6 @@ elif page == "Kommentar":
                     category = classify_poster(use_name, record, poster_info)
                     cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
 
-                    if record:
-                        f = record.get("fields", {})
-                        st.info(f"{cat_emoji} **{cat_label}** — {f.get('Firma', '')} | {f.get('Position', '')}")
-                    else:
-                        st.info(f"{cat_emoji} **{cat_label}**")
-
                     prompt = build_comment_prompt(post_text, use_name, category, record)
                     raw_result, error = generate_comments(prompt)
 
@@ -1005,36 +1064,70 @@ elif page == "Kommentar":
                         st.error(f"Fehler: {error}")
                     elif raw_result:
                         options = parse_comment_options(raw_result)
-                        st.session_state["comment_options"] = options
-                        st.session_state["comment_raw"] = raw_result
-                        st.session_state["comment_category"] = category
+                        st.session_state["batch_comments"] = [{
+                            "name": use_name,
+                            "headline": poster_info,
+                            "category": category,
+                            "cat_label": cat_label,
+                            "cat_emoji": cat_emoji,
+                            "record": record,
+                            "options": options,
+                            "raw": raw_result,
+                        }]
                     else:
-                        st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
+                        st.error("Keine Kommentare generiert.")
 
-    # Show comment results
-    if st.session_state.get("comment_options"):
-        options = st.session_state["comment_options"]
+    # Show all comment results (batch)
+    if st.session_state.get("batch_comments"):
+        results = st.session_state["batch_comments"]
+        st.markdown(f"### {len(results)} Posts — Kommentare bereit")
 
-        if options:
-            for opt in options:
-                issues = validate_comment(opt["comment"])
-                st.markdown(f"""<div class="message-box">
-<div class="lead-name">{opt['label']} | {opt['formula']}</div>
+        for ridx, res in enumerate(results):
+            pname = res["name"]
+            cat_emoji = res["cat_emoji"]
+            cat_label = res["cat_label"]
+            record = res.get("record")
+
+            crm_info = ""
+            if record:
+                f = record.get("fields", {})
+                crm_info = f" — {f.get('Firma', '')} | {f.get('Position', '')}"
+
+            st.markdown(f"""<div class="message-box">
+<div class="lead-name">{cat_emoji} {pname} — {cat_label}{crm_info}</div>
+<div class="lead-info">{res.get('headline', '')}</div>
 </div>""", unsafe_allow_html=True)
-                st.code(opt["comment"], language=None)
+
+            options = res["options"]
+            if options:
+                # Show best option (first one) prominently
+                best = options[0]
+                issues = validate_comment(best["comment"])
+                st.code(best["comment"], language=None)
                 if issues:
-                    st.warning("Probleme: " + " | ".join(issues))
+                    st.warning(" | ".join(issues))
                 else:
                     st.success("Geprueft: OK")
-                st.caption("Kopieren → als Kommentar posten")
-                st.divider()
-        else:
-            st.markdown("**Kommentar-Optionen:**")
-            st.code(st.session_state.get("comment_raw", ""), language=None)
+                st.caption(f"Kopieren → bei {pname} als Kommentar posten")
+
+                # Show alternatives in expander
+                if len(options) > 1:
+                    with st.expander(f"Alternativen fuer {pname}"):
+                        for opt in options[1:]:
+                            st.markdown(f"**{opt['label']} | {opt['formula']}**")
+                            st.code(opt["comment"], language=None)
+                            alt_issues = validate_comment(opt["comment"])
+                            if alt_issues:
+                                st.warning(" | ".join(alt_issues))
+                            else:
+                                st.success("OK")
+            else:
+                st.code(res.get("raw", ""), language=None)
+
+            st.divider()
 
         if st.button("Neue Kommentare", use_container_width=True):
-            st.session_state["comment_options"] = None
-            st.session_state["comment_raw"] = None
+            st.session_state["batch_comments"] = None
             st.rerun()
 
 
