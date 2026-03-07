@@ -218,7 +218,7 @@ def gemini_request(prompt, image_bytes=None, media_type="image/png", max_tokens=
     }
 
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
@@ -636,7 +636,7 @@ if page == "Nachrichten senden":
     st.title("💬 Nachrichten senden")
     st.caption("Namen eingeben ODER Screenshot hochladen")
 
-    input_tab1, input_tab2 = st.tabs(["Text eingeben", "Screenshot"])
+    input_tab2, input_tab1 = st.tabs(["Screenshot", "Text eingeben"])
 
     with input_tab1:
         text_input = st.text_area(
@@ -791,7 +791,7 @@ elif page == "Kommentar":
     st.title("💬 Kommentar-Generator")
     st.caption("Post einfügen ODER Screenshot hochladen → 3 Kommentar-Optionen")
 
-    comment_tab1, comment_tab2 = st.tabs(["Text eingeben", "Screenshot"])
+    comment_tab2, comment_tab1 = st.tabs(["Screenshot", "Text eingeben"])
 
     with comment_tab1:
         col_name, col_info = st.columns(2)
