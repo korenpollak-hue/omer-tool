@@ -1028,55 +1028,6 @@ elif page == "Kommentar":
             if all_batch_results:
                 st.session_state["batch_comments"] = all_batch_results
 
-    # Alternative: text input
-    with st.expander("Oder: Post-Text manuell einfuegen"):
-        poster_name = st.text_input(
-            "Wer hat gepostet? (optional)",
-            placeholder="Max Mueller",
-            key="poster_name",
-        )
-        poster_info = st.text_input(
-            "Headline (optional)",
-            placeholder="CEO bei Firma XY, Top Voice...",
-            key="poster_info",
-        )
-        post_text = st.text_area(
-            "Post-Text einfuegen",
-            placeholder="Den LinkedIn-Post hier reinkopieren...",
-            height=200,
-            key="post_text",
-        )
-
-        if st.button("Kommentare generieren", type="primary", use_container_width=True, key="btn_comment_text"):
-            if not post_text.strip():
-                st.warning("Bitte Post-Text einfuegen.")
-            else:
-                with st.spinner("Checke CRM + generiere Kommentare..."):
-                    use_name = poster_name.strip() or "Unbekannt"
-                    record = find_lead_by_name(use_name) if use_name != "Unbekannt" else None
-                    category = classify_poster(use_name, record, poster_info)
-                    cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
-
-                    prompt = build_comment_prompt(post_text, use_name, category, record)
-                    raw_result, error = generate_comments(prompt)
-
-                    if error:
-                        st.error(f"Fehler: {error}")
-                    elif raw_result:
-                        options = parse_comment_options(raw_result)
-                        st.session_state["batch_comments"] = [{
-                            "name": use_name,
-                            "headline": poster_info,
-                            "category": category,
-                            "cat_label": cat_label,
-                            "cat_emoji": cat_emoji,
-                            "record": record,
-                            "options": options,
-                            "raw": raw_result,
-                        }]
-                    else:
-                        st.error("Keine Kommentare generiert.")
-
     # Show all comment results (batch)
     if st.session_state.get("batch_comments"):
         results = st.session_state["batch_comments"]
