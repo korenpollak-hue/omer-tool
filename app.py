@@ -16,6 +16,8 @@ import urllib.parse
 import os
 import re
 import base64
+import io
+from streamlit_paste_button import paste_image_button as pbutton
 
 # --- Config ---
 # Support both .env (local) and Streamlit secrets (cloud)
@@ -841,22 +843,34 @@ if page == "Nachrichten senden":
 
     with input_tab2:
         screenshot = st.file_uploader(
-            "Screenshot hochladen oder hier reinziehen",
+            "Screenshot hochladen oder reinziehen",
             type=["png", "jpg", "jpeg", "webp"],
             key="names_screenshot",
-            help="LinkedIn Connections-Liste oder Profil-Screenshot — Drag & Drop oder auswaehlen",
+            help="Drag & Drop oder auswaehlen",
         )
 
-        st.caption("Drag & Drop, oder 'Browse files' klicken")
+        st.markdown("**oder**")
+        paste_result = pbutton("Screenshot einfuegen (Ctrl+V)", key="paste_names")
 
+        # Determine image source: uploaded file or pasted
+        names_image_bytes = None
+        names_media_type = "image/png"
         if screenshot:
+            names_image_bytes = screenshot.getvalue()
+            names_media_type = get_media_type(screenshot.name)
             st.image(screenshot, caption="Screenshot", use_container_width=True)
+        elif paste_result and paste_result.image_data is not None:
+            buf = io.BytesIO()
+            paste_result.image_data.save(buf, format="PNG")
+            names_image_bytes = buf.getvalue()
+            names_media_type = "image/png"
+            st.image(paste_result.image_data, caption="Eingefuegter Screenshot", use_container_width=True)
 
         if st.button("Namen aus Screenshot erkennen", type="primary", use_container_width=True, key="btn_screenshot_load"):
-            if screenshot:
+            if names_image_bytes:
                 with st.spinner("Analysiere Screenshot mit AI..."):
-                    image_bytes = screenshot.getvalue()
-                    media_type = get_media_type(screenshot.name)
+                    image_bytes = names_image_bytes
+                    media_type = names_media_type
                     analysis, error = gemini_request(
                         SCREENSHOT_PROMPT_NAMES, image_bytes, media_type
                     )
@@ -877,7 +891,7 @@ if page == "Nachrichten senden":
                                 st.session_state["not_found"] = not_found
                                 st.session_state["names_count"] = len(names)
             else:
-                st.warning("Bitte erst einen Screenshot hochladen.")
+                st.warning("Bitte erst einen Screenshot hochladen oder einfuegen (Ctrl+V).")
 
     # Show results
     if st.session_state.get("matched") is not None:
@@ -987,27 +1001,39 @@ elif page == "Kommentar":
 
     # Multiple screenshot upload
     post_screenshots = st.file_uploader(
-        "Screenshots hier reinziehen (einzeln oder mehrere)",
+        "Screenshots reinziehen (einzeln oder mehrere)",
         type=["png", "jpg", "jpeg", "webp"],
         key="post_screenshots",
-        help="Drag & Drop, auswaehlen oder Ctrl+V einfuegen",
+        help="Drag & Drop oder auswaehlen",
         accept_multiple_files=True,
     )
 
-    st.caption("Drag & Drop, oder 'Browse files' klicken — mehrere auf einmal moeglich")
+    st.markdown("**oder**")
+    paste_result_comment = pbutton("Screenshot einfuegen (Ctrl+V)", key="paste_comment")
 
-    if post_screenshots:
-        for img in post_screenshots:
+    # Combine uploaded + pasted images
+    comment_images = list(post_screenshots) if post_screenshots else []
+    if paste_result_comment and paste_result_comment.image_data is not None:
+        # Convert PIL to file-like for uniform handling
+        buf = io.BytesIO()
+        paste_result_comment.image_data.save(buf, format="PNG")
+        buf.seek(0)
+        buf.name = "pasted_screenshot.png"
+        comment_images.append(buf)
+        st.image(paste_result_comment.image_data, caption="Eingefuegter Screenshot", use_container_width=True)
+
+    if comment_images:
+        for img in post_screenshots or []:
             st.image(img, caption=img.name, use_container_width=True, width=300)
 
         if st.button("Kommentare fuer alle generieren", type="primary", use_container_width=True, key="btn_comment_batch"):
             all_batch_results = []
 
-            for idx, screenshot in enumerate(post_screenshots):
+            for idx, screenshot in enumerate(comment_images):
                 st.markdown(f"---")
-                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(post_screenshots)}..."):
-                    image_bytes = screenshot.getvalue()
-                    media_type = get_media_type(screenshot.name)
+                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(comment_images)}..."):
+                    image_bytes = screenshot.getvalue() if hasattr(screenshot, 'getvalue') else screenshot.read()
+                    media_type = get_media_type(getattr(screenshot, 'name', 'pasted.png'))
 
                     # Use multi-post prompt to catch feed screenshots with multiple posts
                     analysis, error = gemini_request(
