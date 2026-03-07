@@ -902,27 +902,81 @@ if page == "Nachrichten senden":
 
 elif page == "Kommentar":
     st.title("💬 Kommentar-Generator")
-    st.caption("Post einfügen ODER Screenshot hochladen → 3 Kommentar-Optionen")
+    st.caption("Screenshot oder Post-Text einfuegen → 3 Kommentar-Optionen")
 
-    comment_tab2, comment_tab1 = st.tabs(["Screenshot", "Text eingeben"])
+    # Screenshot upload — supports drag & drop, file picker, and browse
+    post_screenshot = st.file_uploader(
+        "Screenshot hier reinziehen oder auswaehlen",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="post_screenshot",
+        help="Screenshot eines LinkedIn-Posts — per Drag & Drop, Datei auswaehlen oder Copy-Paste",
+        label_visibility="visible",
+    )
 
-    with comment_tab1:
-        col_name, col_info = st.columns(2)
-        with col_name:
-            poster_name = st.text_input(
-                "Wer hat gepostet?",
-                placeholder="Max Mueller",
-                key="poster_name",
-            )
-        with col_info:
-            poster_info = st.text_input(
-                "Headline (optional)",
-                placeholder="CEO bei Firma XY, Top Voice...",
-                key="poster_info",
-            )
+    if post_screenshot:
+        st.image(post_screenshot, caption="Hochgeladener Post", use_container_width=True)
 
+        if st.button("Kommentare generieren", type="primary", use_container_width=True, key="btn_comment_screenshot"):
+            with st.spinner("Analysiere Screenshot + generiere Kommentare..."):
+                image_bytes = post_screenshot.getvalue()
+                media_type = get_media_type(post_screenshot.name)
+                analysis, error = gemini_request(
+                    SCREENSHOT_PROMPT_POST, image_bytes, media_type
+                )
+                if error:
+                    st.error(f"Screenshot-Analyse Fehler: {error}")
+                elif analysis:
+                    post_info = parse_post_from_screenshot(analysis)
+                    extracted_name = post_info["name"]
+                    extracted_headline = post_info["headline"]
+                    extracted_text = post_info["text"]
+
+                    if not extracted_text:
+                        st.warning("Konnte keinen Post-Text im Screenshot erkennen.")
+                        with st.expander("AI-Analyse anzeigen"):
+                            st.text(analysis)
+                    else:
+                        st.success(f"Erkannt: **{extracted_name}** — {extracted_headline}")
+                        with st.expander("Erkannter Post-Text"):
+                            st.text(extracted_text)
+
+                        record = find_lead_by_name(extracted_name) if extracted_name else None
+                        category = classify_poster(extracted_name or "", record, extracted_headline)
+                        cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
+
+                        if record:
+                            f = record.get("fields", {})
+                            st.info(f"{cat_emoji} **{cat_label}** — {f.get('Firma', '')} | {f.get('Position', '')}")
+                        else:
+                            st.info(f"{cat_emoji} **{cat_label}**")
+
+                        prompt = build_comment_prompt(extracted_text, extracted_name or "Unbekannt", category, record)
+                        raw_result, error = generate_comments(prompt)
+
+                        if error:
+                            st.error(f"Fehler: {error}")
+                        elif raw_result:
+                            options = parse_comment_options(raw_result)
+                            st.session_state["comment_options"] = options
+                            st.session_state["comment_raw"] = raw_result
+                            st.session_state["comment_category"] = category
+                        else:
+                            st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
+
+    # Alternative: text input (expandable)
+    with st.expander("Oder: Post-Text manuell einfuegen"):
+        poster_name = st.text_input(
+            "Wer hat gepostet? (optional)",
+            placeholder="Max Mueller",
+            key="poster_name",
+        )
+        poster_info = st.text_input(
+            "Headline (optional)",
+            placeholder="CEO bei Firma XY, Top Voice...",
+            key="poster_info",
+        )
         post_text = st.text_area(
-            "Post-Text einfügen",
+            "Post-Text einfuegen",
             placeholder="Den LinkedIn-Post hier reinkopieren...",
             height=200,
             key="post_text",
@@ -930,13 +984,12 @@ elif page == "Kommentar":
 
         if st.button("Kommentare generieren", type="primary", use_container_width=True, key="btn_comment_text"):
             if not post_text.strip():
-                st.warning("Bitte Post-Text einfügen.")
-            elif not poster_name.strip():
-                st.warning("Bitte den Namen des Posters eingeben.")
+                st.warning("Bitte Post-Text einfuegen.")
             else:
                 with st.spinner("Checke CRM + generiere Kommentare..."):
-                    record = find_lead_by_name(poster_name)
-                    category = classify_poster(poster_name, record, poster_info)
+                    use_name = poster_name.strip() or "Unbekannt"
+                    record = find_lead_by_name(use_name) if use_name != "Unbekannt" else None
+                    category = classify_poster(use_name, record, poster_info)
                     cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
 
                     if record:
@@ -945,7 +998,7 @@ elif page == "Kommentar":
                     else:
                         st.info(f"{cat_emoji} **{cat_label}**")
 
-                    prompt = build_comment_prompt(post_text, poster_name, category, record)
+                    prompt = build_comment_prompt(post_text, use_name, category, record)
                     raw_result, error = generate_comments(prompt)
 
                     if error:
@@ -957,67 +1010,6 @@ elif page == "Kommentar":
                         st.session_state["comment_category"] = category
                     else:
                         st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
-
-    with comment_tab2:
-        post_screenshot = st.file_uploader(
-            "Post-Screenshot hochladen",
-            type=["png", "jpg", "jpeg", "webp"],
-            key="post_screenshot",
-            help="Screenshot eines LinkedIn-Posts",
-        )
-        if post_screenshot:
-            st.image(post_screenshot, caption="Hochgeladener Post", use_container_width=True)
-
-        if st.button("Kommentare aus Screenshot generieren", type="primary", use_container_width=True, key="btn_comment_screenshot"):
-            if post_screenshot:
-                with st.spinner("Analysiere Screenshot..."):
-                    image_bytes = post_screenshot.getvalue()
-                    media_type = get_media_type(post_screenshot.name)
-                    analysis, error = gemini_request(
-                        SCREENSHOT_PROMPT_POST, image_bytes, media_type
-                    )
-                    if error:
-                        st.error(f"Screenshot-Analyse Fehler: {error}")
-                    elif analysis:
-                        post_info = parse_post_from_screenshot(analysis)
-                        extracted_name = post_info["name"]
-                        extracted_headline = post_info["headline"]
-                        extracted_text = post_info["text"]
-
-                        if not extracted_text:
-                            st.warning("Konnte keinen Post-Text im Screenshot erkennen.")
-                            with st.expander("AI-Analyse anzeigen"):
-                                st.text(analysis)
-                        else:
-                            st.success(f"Erkannt: **{extracted_name}** — {extracted_headline}")
-                            with st.expander("Erkannter Post-Text"):
-                                st.text(extracted_text)
-
-                            with st.spinner("Checke CRM + generiere Kommentare..."):
-                                record = find_lead_by_name(extracted_name) if extracted_name else None
-                                category = classify_poster(extracted_name or "", record, extracted_headline)
-                                cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "❓"))
-
-                                if record:
-                                    f = record.get("fields", {})
-                                    st.info(f"{cat_emoji} **{cat_label}** — {f.get('Firma', '')} | {f.get('Position', '')}")
-                                else:
-                                    st.info(f"{cat_emoji} **{cat_label}**")
-
-                                prompt = build_comment_prompt(extracted_text, extracted_name or "Unbekannt", category, record)
-                                raw_result, error = generate_comments(prompt)
-
-                                if error:
-                                    st.error(f"Fehler: {error}")
-                                elif raw_result:
-                                    options = parse_comment_options(raw_result)
-                                    st.session_state["comment_options"] = options
-                                    st.session_state["comment_raw"] = raw_result
-                                    st.session_state["comment_category"] = category
-                                else:
-                                    st.error("Keine Kommentare generiert. Bitte nochmal versuchen.")
-            else:
-                st.warning("Bitte erst einen Screenshot hochladen.")
 
     # Show comment results
     if st.session_state.get("comment_options"):
