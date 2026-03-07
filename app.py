@@ -997,43 +997,45 @@ if page == "Nachrichten senden":
 
 elif page == "Kommentar":
     st.title("💬 Kommentar-Generator")
-    st.caption("Screenshots hochladen oder einfuegen → Kommentare fuer alle Posts")
 
-    # Multiple screenshot upload
-    post_screenshots = st.file_uploader(
-        "Screenshots reinziehen (einzeln oder mehrere)",
-        type=["png", "jpg", "jpeg", "webp"],
-        key="post_screenshots",
-        help="Drag & Drop oder auswaehlen",
-        accept_multiple_files=True,
-    )
+    comment_tab1, comment_tab2 = st.tabs(["Screenshot", "Text einfuegen"])
 
-    st.markdown("**oder**")
-    paste_result_comment = pbutton("Screenshot einfuegen (Ctrl+V)", key="paste_comment")
+    with comment_tab1:
+        st.caption("Screenshot hochladen oder einfuegen")
 
-    # Combine uploaded + pasted images
-    comment_images = list(post_screenshots) if post_screenshots else []
-    if paste_result_comment and paste_result_comment.image_data is not None:
-        # Convert PIL to file-like for uniform handling
-        buf = io.BytesIO()
-        paste_result_comment.image_data.save(buf, format="PNG")
-        buf.seek(0)
-        buf.name = "pasted_screenshot.png"
-        comment_images.append(buf)
-        st.image(paste_result_comment.image_data, caption="Eingefuegter Screenshot", use_container_width=True)
+        post_screenshots = st.file_uploader(
+            "Screenshots reinziehen (einzeln oder mehrere)",
+            type=["png", "jpg", "jpeg", "webp"],
+            key="post_screenshots",
+            help="Drag & Drop oder auswaehlen",
+            accept_multiple_files=True,
+        )
 
-    if comment_images:
-        for img in post_screenshots or []:
-            st.image(img, caption=img.name, use_container_width=True, width=300)
+        st.markdown("**oder**")
+        paste_result_comment = pbutton("Screenshot einfuegen (Ctrl+V)", key="paste_comment")
 
-        if st.button("Kommentare fuer alle generieren", type="primary", use_container_width=True, key="btn_comment_batch"):
-            all_batch_results = []
+        # Combine uploaded + pasted images
+        comment_images = list(post_screenshots) if post_screenshots else []
+        if paste_result_comment and paste_result_comment.image_data is not None:
+            buf = io.BytesIO()
+            paste_result_comment.image_data.save(buf, format="PNG")
+            buf.seek(0)
+            buf.name = "pasted_screenshot.png"
+            comment_images.append(buf)
+            st.image(paste_result_comment.image_data, caption="Eingefuegter Screenshot", use_container_width=True)
 
-            for idx, screenshot in enumerate(comment_images):
-                st.markdown(f"---")
-                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(comment_images)}..."):
-                    image_bytes = screenshot.getvalue() if hasattr(screenshot, 'getvalue') else screenshot.read()
-                    media_type = get_media_type(getattr(screenshot, 'name', 'pasted.png'))
+        if comment_images:
+            for img in post_screenshots or []:
+                st.image(img, caption=img.name, use_container_width=True, width=300)
+
+            if st.button("Kommentare generieren", type="primary", use_container_width=True, key="btn_comment_batch"):
+                all_batch_results = []
+
+                for idx, screenshot in enumerate(comment_images):
+                    st.markdown(f"---")
+                    with st.spinner(f"Analysiere Screenshot {idx+1}/{len(comment_images)}..."):
+                        image_bytes = screenshot.getvalue() if hasattr(screenshot, 'getvalue') else screenshot.read()
+                        media_type = get_media_type(getattr(screenshot, 'name', 'pasted.png'))
 
                     # Use multi-post prompt to catch feed screenshots with multiple posts
                     analysis, error = gemini_request(
@@ -1090,6 +1092,69 @@ elif page == "Kommentar":
 
             if all_batch_results:
                 st.session_state["batch_comments"] = all_batch_results
+
+    with comment_tab2:
+        st.caption("Post-Text reinkopieren — AI erkennt den Poster automatisch")
+        comment_text_input = st.text_area(
+            "Post-Text hier einfuegen",
+            placeholder="Einfach den ganzen Post-Text kopieren und hier einfuegen.\nDie AI erkennt Name, Position und Inhalt automatisch.",
+            height=250,
+            key="comment_text_input",
+        )
+
+        if st.button("Kommentar generieren", type="primary", use_container_width=True, key="btn_comment_text"):
+            if comment_text_input.strip():
+                with st.spinner("Analysiere Text und generiere Kommentar..."):
+                    # Use Gemini to extract poster info from raw text
+                    extract_prompt = f"""Analysiere diesen LinkedIn-Post Text. Extrahiere:
+1. POSTER_NAME: Wer hat den Post geschrieben? (Falls erkennbar)
+2. POSTER_HEADLINE: Position/Firma (falls erkennbar)
+3. POST_TEXT: Der eigentliche Inhalt
+
+Wenn der Name nicht erkennbar ist, schreib "Unbekannt".
+
+TEXT:
+---
+{comment_text_input[:3000]}
+---
+
+Format:
+POSTER_NAME: [Name]
+POSTER_HEADLINE: [Headline]
+POST_TEXT:
+[Text]"""
+                    analysis, error = gemini_request(extract_prompt, max_tokens=1000)
+                    if error:
+                        st.error(f"Fehler: {error}")
+                    elif analysis:
+                        post_info = parse_post_from_screenshot(analysis)
+                        pname = post_info["name"] or "Unbekannt"
+                        pheadline = post_info["headline"] or ""
+                        ptext = post_info["text"] or comment_text_input.strip()
+
+                        record = find_lead_by_name(pname) if pname and pname != "Unbekannt" else None
+                        category = classify_poster(pname, record, pheadline)
+                        cat_label, cat_emoji = CATEGORY_LABELS.get(category, ("?", "?"))
+
+                        prompt = build_comment_prompt(ptext, pname, category, record)
+                        raw_result, gen_error = generate_comments(prompt)
+
+                        if gen_error or not raw_result:
+                            st.error(f"Fehler: {gen_error}")
+                        else:
+                            options = parse_comment_options(raw_result)
+                            st.session_state["batch_comments"] = [{
+                                "name": pname,
+                                "headline": pheadline,
+                                "category": category,
+                                "cat_label": cat_label,
+                                "cat_emoji": cat_emoji,
+                                "record": record,
+                                "options": options,
+                                "raw": raw_result,
+                            }]
+            else:
+                st.warning("Bitte Post-Text einfuegen.")
 
     # Show all comment results (batch)
     if st.session_state.get("batch_comments"):
