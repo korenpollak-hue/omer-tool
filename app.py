@@ -379,19 +379,102 @@ SO KLINGTS RICHTIG:
 Gib NUR die nachricht aus. Nix davor nix danach."""
 
 
+def validate_message(message, lead_fields):
+    """Second Gemini call: validate message against framework rules and facts."""
+    vorname = lead_fields.get("Vorname", "") or lead_fields.get("Name", "").split()[0] if lead_fields.get("Name") else ""
+    firma = lead_fields.get("Firma", "")
+    position = lead_fields.get("Position", "")
+    branche = lead_fields.get("Branche", "")
+    firma_desc = lead_fields.get("Firmenbeschreibung", "")
+
+    prompt = f"""Du bist ein strenger Qualitaetspruefer fuer LinkedIn-Nachrichten.
+
+NACHRICHT ZUM PRUEFEN:
+"{message}"
+
+BEKANNTE FAKTEN UEBER DIE PERSON (aus unserem CRM):
+- Name: {vorname}
+- Firma: {firma}
+- Position: {position}
+- Branche: {branche}
+- Firmeninfo: {firma_desc[:400]}
+
+PRUEFE DIESE REGELN:
+
+1. FAKTENCHECK: Erwaehnt die Nachricht Firmennamen, Produkte, Events, Insolvenzen, Zahlen oder andere spezifische Fakten die NICHT in den bekannten CRM-Daten stehen? Wenn ja = FAIL (moeglicherweise halluziniert!)
+2. LAENGE: Unter 250 Zeichen? Wenn nein = FAIL
+3. VERBOTENE WOERTER: Enthaelt "danke fuers vernetzen", "ich bin Koren", "wir helfen", "wir machen videos", "spannend", "beeindruckt", "freue mich", "ich hoffe", "interessant"? Wenn ja = FAIL
+4. GEDANKENSTRICHE/EMOJIS: Enthaelt Gedankenstriche (—, –) oder Emojis? Wenn ja = FAIL
+5. ANFUEHRUNGSZEICHEN: Setzt Woerter in Anfuehrungszeichen? Wenn ja = FAIL
+6. TON: Klingt es natuerlich wie am Handy getippt? Oder zu perfekt/AI-artig?
+
+ANTWORT FORMAT (genau so):
+STATUS: OK oder FAIL
+PROBLEME: [Liste der Probleme, oder "keine"]
+VORSCHLAG: [Verbesserte Version falls FAIL, oder "keiner"]"""
+
+    result, error = gemini_request(prompt, max_tokens=800, temperature=0.1)
+    if error or not result:
+        return {"status": "UNKNOWN", "problems": "Validierung fehlgeschlagen", "suggestion": ""}
+
+    status = "OK" if "STATUS: OK" in result or "STATUS:OK" in result else "FAIL"
+    problems = ""
+    suggestion = ""
+
+    for line in result.split("\n"):
+        if line.startswith("PROBLEME:"):
+            problems = line.replace("PROBLEME:", "").strip()
+        elif line.startswith("VORSCHLAG:"):
+            suggestion = line.replace("VORSCHLAG:", "").strip()
+
+    # Also extract multi-line suggestion
+    if "VORSCHLAG:" in result:
+        parts = result.split("VORSCHLAG:")
+        if len(parts) > 1:
+            suggestion = parts[1].strip()
+            # Clean up quotes
+            if suggestion.startswith('"') and suggestion.endswith('"'):
+                suggestion = suggestion[1:-1]
+
+    return {"status": status, "problems": problems, "suggestion": suggestion}
+
+
 def generate_message_for_lead(lead_fields):
-    """Generate a personalized message via Gemini. Returns message text or None."""
+    """Generate + validate a personalized message via Gemini. Returns (message, validation) tuple."""
     prompt = build_message_prompt(lead_fields)
-    text, error = gemini_request(prompt, max_tokens=500, temperature=0.8)
-    if error or not text:
-        return None
-    # Clean up quotes
-    text = text.strip()
-    if text.startswith('"') and text.endswith('"'):
-        text = text[1:-1]
-    if text.startswith('\u201e') and text.endswith('\u201c'):
-        text = text[1:-1]
-    return text.strip()
+
+    # Try up to 2 times: generate → validate → if FAIL, use suggestion or regenerate
+    for attempt in range(2):
+        text, error = gemini_request(prompt, max_tokens=500, temperature=0.8)
+        if error or not text:
+            return None, None
+
+        # Clean up quotes
+        text = text.strip()
+        if text.startswith('"') and text.endswith('"'):
+            text = text[1:-1]
+        if text.startswith('\u201e') and text.endswith('\u201c'):
+            text = text[1:-1]
+        text = text.strip()
+
+        # Validate
+        validation = validate_message(text, lead_fields)
+
+        if validation["status"] == "OK":
+            return text, validation
+
+        # If FAIL and we have a suggestion, use it on first attempt
+        if attempt == 0 and validation.get("suggestion") and validation["suggestion"] != "keiner":
+            suggested = validation["suggestion"].strip()
+            if len(suggested) > 20:
+                # Validate the suggestion too
+                val2 = validate_message(suggested, lead_fields)
+                if val2["status"] == "OK":
+                    return suggested, val2
+            # Otherwise try again with a fresh generation
+
+    # Return last attempt with its validation (even if FAIL — user decides)
+    return text, validation
 
 
 def save_message_to_airtable(record_id, message):
@@ -557,6 +640,29 @@ Gib NUR die 3 Optionen aus. Nix davor nix danach."""
 def generate_comments(prompt):
     """Generate comments via Gemini API (free, cloud-compatible)."""
     return gemini_request(prompt, max_tokens=1500, temperature=0.7)
+
+
+def validate_comment(comment):
+    """Quick validation of a single comment."""
+    issues = []
+    if len(comment) < 50:
+        issues.append("Zu kurz (unter 50 Zeichen)")
+    words = comment.split()
+    if len(words) < 15:
+        issues.append("Unter 15 Woerter (LinkedIn Algorithmus ignoriert kurze Kommentare)")
+    if len(words) > 150:
+        issues.append("Zu lang (ueber 150 Woerter)")
+    banned = ["toller beitrag", "danke fuers teilen", "100% agree", "super post",
+              "film-labor", "film labor", "filmlabor", "recruiting-video", "imagefilm"]
+    lower = comment.lower()
+    for b in banned:
+        if b in lower:
+            issues.append(f"Verbotenes Wort/Phrase: '{b}'")
+    if comment.count("http") > 0:
+        issues.append("Enthaelt Link (verboten in Kommentaren)")
+    if not comment.rstrip().endswith("?"):
+        issues.append("Endet nicht mit einer Frage (Fragen foerdern Antworten)")
+    return issues
 
 
 def parse_comment_options(raw_text):
@@ -743,19 +849,26 @@ if page == "Nachrichten senden":
 </div>""", unsafe_allow_html=True)
 
                 if st.button("Nachricht generieren", key=gen_key, use_container_width=True):
-                    with st.spinner(f"Generiere Nachricht fuer {vorname}..."):
-                        generated = generate_message_for_lead(f)
+                    with st.spinner(f"Generiere + pruefe Nachricht fuer {vorname}..."):
+                        generated, validation = generate_message_for_lead(f)
                         if generated:
-                            try:
-                                save_message_to_airtable(rec_id, generated)
-                                for m in st.session_state["matched"]:
-                                    if m["record"]["id"] == rec_id:
-                                        m["record"]["fields"]["Personalisierte Nachricht"] = generated
-                                        m["record"]["fields"]["Nachricht Status"] = "Entwurf"
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Speichern fehlgeschlagen: {e}")
+                            # Show validation result
+                            if validation and validation["status"] == "FAIL":
+                                st.warning(f"Validierung: {validation['problems']}")
                                 st.code(generated, language=None)
+                                st.caption("Diese Nachricht hat die Pruefung NICHT bestanden. Bitte manuell pruefen!")
+                            else:
+                                st.success("Nachricht geprueft und OK")
+                                st.code(generated, language=None)
+                                try:
+                                    save_message_to_airtable(rec_id, generated)
+                                    for m in st.session_state["matched"]:
+                                        if m["record"]["id"] == rec_id:
+                                            m["record"]["fields"]["Personalisierte Nachricht"] = generated
+                                            m["record"]["fields"]["Nachricht Status"] = "Entwurf"
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Speichern fehlgeschlagen: {e}")
                         else:
                             st.error("Konnte keine Nachricht generieren. Bitte nochmal versuchen.")
                 continue
@@ -912,10 +1025,15 @@ elif page == "Kommentar":
 
         if options:
             for opt in options:
+                issues = validate_comment(opt["comment"])
                 st.markdown(f"""<div class="message-box">
 <div class="lead-name">{opt['label']} | {opt['formula']}</div>
 </div>""", unsafe_allow_html=True)
                 st.code(opt["comment"], language=None)
+                if issues:
+                    st.warning("Probleme: " + " | ".join(issues))
+                else:
+                    st.success("Geprueft: OK")
                 st.caption("Kopieren → als Kommentar posten")
                 st.divider()
         else:
