@@ -609,42 +609,58 @@ LEAD-DATEN (Person ist ein PROSPECT in unserem CRM):
 
     category_instructions = {
         "PROSPECT": """KATEGORIE: PROSPECT (potentieller Kunde!)
-ZIEL: Expertise zeigen, Vertrauen aufbauen, im Kopf bleiben. KEIN Pitch!
-BESTE FORMELN:
-1. Pain Point Mirror -- zeig dass du das Problem kennst
-2. Qualification Question -- stelle eine kluge Fachfrage
-3. Specific Experience -- teile eine relevante Erfahrung/Zahl
-WICHTIG: Das ist ein Warm-Up VOR oder NACH der Vernetzung. Sei hilfreich, nicht verkaeufisch.""",
+ZIEL: Zeig dass du Ahnung hast, bleib im Kopf. KEIN Pitch, KEIN Verkauf.
+ANSAETZE:
+- Zeig dass du das Problem aus der Praxis kennst
+- Stell eine kluge Frage die zeigt dass du mitdenkst
+- Teil eine kurze eigene Erfahrung (Video/Content-Bereich)
+Das ist Warm-Up — du willst nur auf dem Radar sein.""",
         "INFLUENCER": """KATEGORIE: INFLUENCER (grosse Reichweite)
-ZIEL: Sichtbarkeit bei deren Publikum, zeig dass du Ahnung hast
-BESTE FORMELN:
-1. Authority Builder -- ergaenze mit Gegen-Position + Daten/Erfahrung
-2. Counter-Intuitive Insight -- widersprich respektvoll mit eigener Perspektive
-3. Metric Challenge -- fuehre eine fortgeschrittene Metrik/Frage ein
-WICHTIG: Hier lesen viele Prospects mit. Dein Kommentar ist deine Visitenkarte.""",
+ZIEL: Klug mitreden — hier lesen viele Leute mit.
+ANSAETZE:
+- Ergaenze eine eigene Perspektive oder Gegen-Erfahrung
+- Widersprich respektvoll mit einer eigenen Beobachtung
+- Stell eine weiterführende Frage
+Dein Kommentar ist deine Visitenkarte fuer alle die mitlesen.""",
         "PEER": """KATEGORIE: PEER (Branchenkollege)
-ZIEL: Netzwerk staerken, gegenseitige Sichtbarkeit
-BESTE FORMELN:
-1. Relationship Builder -- zeig dass du ihren Content verfolgst
-2. Curiosity Driver -- starte eine echte Diskussion
-WICHTIG: Kollegial, auf Augenhoehe. Kein Wettbewerb.""",
-        "KUNDE": """KATEGORIE: BESTEHENDER KUNDE/KONTAKT
-ZIEL: Beziehung pflegen, Top-of-Mind bleiben
-BESTE FORMELN:
-1. Value Demonstrator -- sofortigen Mehrwert liefern
-2. DM Bridge -- Kommentar als Bruecke zu Privatnachricht
-WICHTIG: Warm, persoenlich, wie ein Freund der kommentiert.""",
+ZIEL: Kollegial mitreden, Netzwerk staerken.
+ANSAETZE:
+- Zeig dass du den Content verfolgst
+- Starte eine echte Diskussion
+Locker, auf Augenhoehe.""",
+        "KUNDE": """KATEGORIE: BESTEHENDER KONTAKT
+ZIEL: In Erinnerung bleiben, Beziehung pflegen.
+ANSAETZE:
+- Direkt Mehrwert liefern oder eigene Erfahrung teilen
+- Warm und persoenlich kommentieren
+Wie ein Kumpel der mitliest.""",
         "UNKNOWN": """KATEGORIE: UNBEKANNT
-ZIEL: Mehrwert liefern, Expertise zeigen
-BESTE FORMELN:
-1. Specific Experience -- teile eine relevante Erfahrung
-2. Curiosity Driver -- stelle eine neugierige Frage
-WICHTIG: Generisch hilfreich, zeig Fachwissen aus dem Video/Content Bereich.""",
+ZIEL: Einfach was Kluges beitragen.
+ANSAETZE:
+- Eigene Erfahrung aus dem Video/Content-Bereich teilen
+- Neugierige Frage stellen
+Zeig Fachwissen ohne zu pushen.""",
     }
 
-    return f"""Du bist Koren von Film-labor. Du kommentierst grade einen LinkedIn-Post am Handy.
+    # Name usage: only for PROSPECT and INFLUENCER, and only first name
+    use_name = category in ("PROSPECT", "INFLUENCER", "KUNDE")
+    name_instruction = ""
+    if use_name and poster_name and poster_name != "Unbekannt":
+        first_name = poster_name.split()[0] if poster_name else ""
+        name_instruction = f"Du KANNST den Vornamen '{first_name}' nutzen (aber nicht in jedem Kommentar, maximal bei 1-2 von 3 Optionen)."
+    else:
+        name_instruction = "Benutze KEINEN Namen — du kennst die Person nicht persoenlich."
+
+    return f"""Du bist Koren, 25, Filmemacher aus Frankfurt (Film-labor). Du kommentierst LinkedIn-Posts am Handy.
+
+DEIN STIL: Locker, direkt, neugierig. Wie ein junger Kreativer der mitredet — NICHT wie ein Unternehmensberater.
+Beispiele fuer deinen Ton:
+- "Das deckt sich mit dem was wir bei Drehs sehen — die meisten unterschaetzen wie viel ein authentisches 30-Sekunden-Video bringt. Habt ihr das intern produziert?"
+- "Spannend. Wir merken gerade den gleichen Shift bei unseren Kunden. Was hat bei euch den Ausschlag gegeben?"
+- "Guter Punkt. Gerade im Mittelstand wird das noch komplett verschlafen. Wie reagieren eure Kunden darauf?"
 
 POSTER: {poster_name}
+{name_instruction}
 {category_instructions.get(category, category_instructions['UNKNOWN'])}
 
 {lead_context}
@@ -654,20 +670,18 @@ DER POST (Inhalt):
 {post_text[:2000]}
 ---
 
-GENERIERE GENAU 3 KOMMENTAR-OPTIONEN. Jede Option ist ein anderer Ansatz.
+GENERIERE GENAU 3 KOMMENTAR-OPTIONEN. Jede Option ist ein ANDERER Ansatz.
 
 KOMMENTAR-REGELN:
-- KURZ: 20-50 Woerter (2-3 Saetze, wie eine schnelle Handy-Antwort)
-- Spezifisch auf den Post eingehen (NIE generisch)
-- Mit einer Frage enden (foerdert Antwort + Sichtbarkeit)
-- Natuerlich und locker (wie man am Handy tippt)
-- ECHTE Umlaute verwenden
-- Keine Emojis oder maximal 1 dezentes
-- KEIN "Toller Beitrag!", "Danke fuers Teilen!", "100% agree!"
-- KEIN Link oder Eigenwerbung
-- KEIN Pitch oder Verkauf
+- KURZ: 20-50 Woerter (2-3 Saetze MAX — wie eine schnelle Handy-Antwort)
+- 100% spezifisch auf DIESEN Post (nie generisch wiederverwendbar)
+- Mit einer Frage oder offenem Gedanken enden
+- Schreib wie du WIRKLICH reden wuerdest (kein Corporate-Deutsch, kein "Exzellenter Punkt", kein "Spannender Beitrag")
+- ECHTE Umlaute (ae→ä, oe→ö, ue→ü)
+- Maximal 1 Emoji (oder keins)
+- VERBOTEN: "Toller Beitrag!", "Danke fuers Teilen!", "100% agree!", Links, Eigenwerbung, Pitch
 
-FORMAT (genau so, nichts anderes):
+FORMAT (genau so):
 
 OPTION A | [Formel-Name]
 [Der Kommentar]
@@ -678,7 +692,7 @@ OPTION B | [Formel-Name]
 OPTION C | [Formel-Name]
 [Der Kommentar]
 
-Gib NUR die 3 Optionen aus. Nix davor nix danach."""
+NUR die 3 Optionen. Nichts davor, nichts danach."""
 
 
 def generate_comments(prompt):
@@ -773,6 +787,20 @@ st.markdown("""
         padding: 3px 10px;
         font-size: 12px;
     }
+    .crm-badge {
+        background: #d1ecf1;
+        color: #0c5460;
+        border-radius: 5px;
+        padding: 3px 10px;
+        font-size: 11px;
+    }
+    .ai-badge {
+        background: #e2d5f1;
+        color: #5a2d82;
+        border-radius: 5px;
+        padding: 3px 10px;
+        font-size: 11px;
+    }
     div[data-testid="stCodeBlock"] {
         font-size: 16px !important;
     }
@@ -819,59 +847,16 @@ if page == "Nachrichten senden":
             help="LinkedIn Connections-Liste oder Profil-Screenshot — Drag & Drop oder auswaehlen",
         )
 
-        # Clipboard paste support
-        paste_key = "pasted_names_img"
-        st.markdown("**Oder: Bild aus Zwischenablage einfuegen (Ctrl+V / Cmd+V)**")
-        paste_html = f"""
-        <div id="paste-zone-names" style="border:2px dashed #ccc;border-radius:12px;padding:24px;text-align:center;color:#888;cursor:pointer;margin-bottom:12px;">
-            Hier klicken und Ctrl+V / Cmd+V druecken
-        </div>
-        <script>
-        const zone = document.getElementById('paste-zone-names');
-        zone.setAttribute('tabindex','0');
-        zone.addEventListener('click', () => zone.focus());
-        zone.addEventListener('paste', (e) => {{
-            const items = e.clipboardData.items;
-            for (let i = 0; i < items.length; i++) {{
-                if (items[i].type.indexOf('image') !== -1) {{
-                    const blob = items[i].getAsFile();
-                    const reader = new FileReader();
-                    reader.onload = () => {{
-                        const b64 = reader.result.split(',')[1];
-                        // Store in sessionStorage and notify Streamlit
-                        window.parent.postMessage({{
-                            type: 'streamlit:setComponentValue',
-                            value: b64
-                        }}, '*');
-                        // Fallback: store in a hidden element for Streamlit to read
-                        const el = document.getElementById('paste-data-names');
-                        if (el) el.value = b64;
-                        zone.innerHTML = '<span style="color:green;">Bild eingefuegt! Jetzt Button druecken.</span>';
-                    }};
-                    reader.readAsDataURL(blob);
-                    e.preventDefault();
-                    return;
-                }}
-            }}
-        }});
-        </script>
-        <input type="hidden" id="paste-data-names" value="">
-        """
-        st.components.v1.html(paste_html, height=90)
+        st.caption("Drag & Drop, oder 'Browse files' klicken")
 
-        # Use camera_input as paste workaround on mobile
-        pasted_img = st.camera_input("Oder Foto aufnehmen", key="names_camera", disabled=False)
-
-        # Determine which image to use
-        names_image = screenshot or pasted_img
-        if names_image:
-            st.image(names_image, caption="Screenshot", use_container_width=True)
+        if screenshot:
+            st.image(screenshot, caption="Screenshot", use_container_width=True)
 
         if st.button("Namen aus Screenshot erkennen", type="primary", use_container_width=True, key="btn_screenshot_load"):
-            if names_image:
+            if screenshot:
                 with st.spinner("Analysiere Screenshot mit AI..."):
-                    image_bytes = names_image.getvalue()
-                    media_type = get_media_type(getattr(names_image, 'name', 'photo.png'))
+                    image_bytes = screenshot.getvalue()
+                    media_type = get_media_type(screenshot.name)
                     analysis, error = gemini_request(
                         SCREENSHOT_PROMPT_NAMES, image_bytes, media_type
                     )
@@ -892,7 +877,7 @@ if page == "Nachrichten senden":
                                 st.session_state["not_found"] = not_found
                                 st.session_state["names_count"] = len(names)
             else:
-                st.warning("Bitte erst einen Screenshot hochladen oder einfuegen.")
+                st.warning("Bitte erst einen Screenshot hochladen.")
 
     # Show results
     if st.session_state.get("matched") is not None:
@@ -952,6 +937,7 @@ if page == "Nachrichten senden":
                                 st.code(generated, language=None)
                                 try:
                                     save_message_to_airtable(rec_id, generated)
+                                    st.session_state[f"ai_generated_{rec_id}"] = True
                                     for m in st.session_state["matched"]:
                                         if m["record"]["id"] == rec_id:
                                             m["record"]["fields"]["Personalisierte Nachricht"] = generated
@@ -963,8 +949,13 @@ if page == "Nachrichten senden":
                             st.error("Konnte keine Nachricht generieren. Bitte nochmal versuchen.")
                 continue
 
+            # Check if message was AI-generated in this session or from CRM
+            source_badge = '<span class="crm-badge">aus CRM</span>'
+            if st.session_state.get(f"ai_generated_{rec_id}"):
+                source_badge = '<span class="ai-badge">AI-generiert</span>'
+
             st.markdown(f"""<div class="message-box">
-<div class="lead-name">{i+1}. {name}</div>
+<div class="lead-name">{i+1}. {name} {source_badge}</div>
 <div class="lead-info">{' | '.join(info_parts)}</div>
 </div>""", unsafe_allow_html=True)
 
@@ -1003,50 +994,20 @@ elif page == "Kommentar":
         accept_multiple_files=True,
     )
 
-    # Clipboard paste support for comments
-    st.markdown("**Oder: Bild aus Zwischenablage einfuegen (Ctrl+V / Cmd+V)**")
-    paste_html_comment = """
-    <div id="paste-zone-comment" style="border:2px dashed #ccc;border-radius:12px;padding:24px;text-align:center;color:#888;cursor:pointer;margin-bottom:12px;">
-        Hier klicken und Ctrl+V / Cmd+V druecken
-    </div>
-    <script>
-    const zoneC = document.getElementById('paste-zone-comment');
-    zoneC.setAttribute('tabindex','0');
-    zoneC.addEventListener('click', () => zoneC.focus());
-    zoneC.addEventListener('paste', (e) => {
-        const items = e.clipboardData.items;
-        for (let i = 0; i < items.length; i++) {
-            if (items[i].type.indexOf('image') !== -1) {
-                zoneC.innerHTML = '<span style="color:green;">Bild erkannt! Bitte nutze den Upload-Button oben (Streamlit kann Paste leider nicht direkt verarbeiten).</span>';
-                e.preventDefault();
-                return;
-            }
-        }
-    });
-    </script>
-    """
-    st.components.v1.html(paste_html_comment, height=90)
+    st.caption("Drag & Drop, oder 'Browse files' klicken — mehrere auf einmal moeglich")
 
-    # Camera input as alternative (mobile)
-    comment_camera = st.camera_input("Oder Foto aufnehmen", key="comment_camera")
-
-    # Combine all image sources
-    all_images = list(post_screenshots) if post_screenshots else []
-    if comment_camera:
-        all_images.append(comment_camera)
-
-    if all_images:
-        for img in all_images:
-            st.image(img, caption=getattr(img, 'name', 'Foto'), use_container_width=True, width=300)
+    if post_screenshots:
+        for img in post_screenshots:
+            st.image(img, caption=img.name, use_container_width=True, width=300)
 
         if st.button("Kommentare fuer alle generieren", type="primary", use_container_width=True, key="btn_comment_batch"):
             all_batch_results = []
 
-            for idx, screenshot in enumerate(all_images):
+            for idx, screenshot in enumerate(post_screenshots):
                 st.markdown(f"---")
-                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(all_images)}..."):
+                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(post_screenshots)}..."):
                     image_bytes = screenshot.getvalue()
-                    media_type = get_media_type(getattr(screenshot, 'name', 'photo.png'))
+                    media_type = get_media_type(screenshot.name)
 
                     # Use multi-post prompt to catch feed screenshots with multiple posts
                     analysis, error = gemini_request(
