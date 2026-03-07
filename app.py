@@ -657,12 +657,10 @@ DER POST (Inhalt):
 GENERIERE GENAU 3 KOMMENTAR-OPTIONEN. Jede Option ist ein anderer Ansatz.
 
 KOMMENTAR-REGELN:
-- 40-120 Woerter (optimal fuer LinkedIn Algorithmus)
+- KURZ: 20-50 Woerter (2-3 Saetze, wie eine schnelle Handy-Antwort)
 - Spezifisch auf den Post eingehen (NIE generisch)
 - Mit einer Frage enden (foerdert Antwort + Sichtbarkeit)
-- Branchenspezifische Sprache nutzen wo passend
-- Eigene Erfahrung/Daten teilen wenn moeglich
-- Professionell aber menschlich (kein Corporate-Deutsch)
+- Natuerlich und locker (wie man am Handy tippt)
 - ECHTE Umlaute verwenden
 - Keine Emojis oder maximal 1 dezentes
 - KEIN "Toller Beitrag!", "Danke fuers Teilen!", "100% agree!"
@@ -691,13 +689,13 @@ def generate_comments(prompt):
 def validate_comment(comment):
     """Quick validation of a single comment."""
     issues = []
-    if len(comment) < 50:
-        issues.append("Zu kurz (unter 50 Zeichen)")
+    if len(comment) < 30:
+        issues.append("Zu kurz (unter 30 Zeichen)")
     words = comment.split()
-    if len(words) < 15:
-        issues.append("Unter 15 Woerter (LinkedIn Algorithmus ignoriert kurze Kommentare)")
-    if len(words) > 150:
-        issues.append("Zu lang (ueber 150 Woerter)")
+    if len(words) < 10:
+        issues.append("Unter 10 Woerter")
+    if len(words) > 60:
+        issues.append("Zu lang (ueber 60 Woerter)")
     banned = ["toller beitrag", "danke fuers teilen", "100% agree", "super post",
               "film-labor", "film labor", "filmlabor", "recruiting-video", "imagefilm"]
     lower = comment.lower()
@@ -815,19 +813,65 @@ if page == "Nachrichten senden":
 
     with input_tab2:
         screenshot = st.file_uploader(
-            "Screenshot hochladen",
+            "Screenshot hochladen oder hier reinziehen",
             type=["png", "jpg", "jpeg", "webp"],
             key="names_screenshot",
-            help="LinkedIn Connections-Liste oder Profil-Screenshot",
+            help="LinkedIn Connections-Liste oder Profil-Screenshot — Drag & Drop oder auswaehlen",
         )
-        if screenshot:
-            st.image(screenshot, caption="Hochgeladener Screenshot", use_container_width=True)
+
+        # Clipboard paste support
+        paste_key = "pasted_names_img"
+        st.markdown("**Oder: Bild aus Zwischenablage einfuegen (Ctrl+V / Cmd+V)**")
+        paste_html = f"""
+        <div id="paste-zone-names" style="border:2px dashed #ccc;border-radius:12px;padding:24px;text-align:center;color:#888;cursor:pointer;margin-bottom:12px;">
+            Hier klicken und Ctrl+V / Cmd+V druecken
+        </div>
+        <script>
+        const zone = document.getElementById('paste-zone-names');
+        zone.setAttribute('tabindex','0');
+        zone.addEventListener('click', () => zone.focus());
+        zone.addEventListener('paste', (e) => {{
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {{
+                if (items[i].type.indexOf('image') !== -1) {{
+                    const blob = items[i].getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = () => {{
+                        const b64 = reader.result.split(',')[1];
+                        // Store in sessionStorage and notify Streamlit
+                        window.parent.postMessage({{
+                            type: 'streamlit:setComponentValue',
+                            value: b64
+                        }}, '*');
+                        // Fallback: store in a hidden element for Streamlit to read
+                        const el = document.getElementById('paste-data-names');
+                        if (el) el.value = b64;
+                        zone.innerHTML = '<span style="color:green;">Bild eingefuegt! Jetzt Button druecken.</span>';
+                    }};
+                    reader.readAsDataURL(blob);
+                    e.preventDefault();
+                    return;
+                }}
+            }}
+        }});
+        </script>
+        <input type="hidden" id="paste-data-names" value="">
+        """
+        st.components.v1.html(paste_html, height=90)
+
+        # Use camera_input as paste workaround on mobile
+        pasted_img = st.camera_input("Oder Foto aufnehmen", key="names_camera", disabled=False)
+
+        # Determine which image to use
+        names_image = screenshot or pasted_img
+        if names_image:
+            st.image(names_image, caption="Screenshot", use_container_width=True)
 
         if st.button("Namen aus Screenshot erkennen", type="primary", use_container_width=True, key="btn_screenshot_load"):
-            if screenshot:
+            if names_image:
                 with st.spinner("Analysiere Screenshot mit AI..."):
-                    image_bytes = screenshot.getvalue()
-                    media_type = get_media_type(screenshot.name)
+                    image_bytes = names_image.getvalue()
+                    media_type = get_media_type(getattr(names_image, 'name', 'photo.png'))
                     analysis, error = gemini_request(
                         SCREENSHOT_PROMPT_NAMES, image_bytes, media_type
                     )
@@ -848,7 +892,7 @@ if page == "Nachrichten senden":
                                 st.session_state["not_found"] = not_found
                                 st.session_state["names_count"] = len(names)
             else:
-                st.warning("Bitte erst einen Screenshot hochladen.")
+                st.warning("Bitte erst einen Screenshot hochladen oder einfuegen.")
 
     # Show results
     if st.session_state.get("matched") is not None:
@@ -948,29 +992,61 @@ if page == "Nachrichten senden":
 
 elif page == "Kommentar":
     st.title("💬 Kommentar-Generator")
-    st.caption("Screenshots hochladen → Kommentare fuer alle Posts auf einmal")
+    st.caption("Screenshots hochladen oder einfuegen → Kommentare fuer alle Posts")
 
     # Multiple screenshot upload
     post_screenshots = st.file_uploader(
         "Screenshots hier reinziehen (einzeln oder mehrere)",
         type=["png", "jpg", "jpeg", "webp"],
         key="post_screenshots",
-        help="1 oder mehrere Screenshots von LinkedIn-Posts — Drag & Drop oder auswaehlen",
+        help="Drag & Drop, auswaehlen oder Ctrl+V einfuegen",
         accept_multiple_files=True,
     )
 
-    if post_screenshots:
-        for img in post_screenshots:
-            st.image(img, caption=img.name, use_container_width=True, width=300)
+    # Clipboard paste support for comments
+    st.markdown("**Oder: Bild aus Zwischenablage einfuegen (Ctrl+V / Cmd+V)**")
+    paste_html_comment = """
+    <div id="paste-zone-comment" style="border:2px dashed #ccc;border-radius:12px;padding:24px;text-align:center;color:#888;cursor:pointer;margin-bottom:12px;">
+        Hier klicken und Ctrl+V / Cmd+V druecken
+    </div>
+    <script>
+    const zoneC = document.getElementById('paste-zone-comment');
+    zoneC.setAttribute('tabindex','0');
+    zoneC.addEventListener('click', () => zoneC.focus());
+    zoneC.addEventListener('paste', (e) => {
+        const items = e.clipboardData.items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+                zoneC.innerHTML = '<span style="color:green;">Bild erkannt! Bitte nutze den Upload-Button oben (Streamlit kann Paste leider nicht direkt verarbeiten).</span>';
+                e.preventDefault();
+                return;
+            }
+        }
+    });
+    </script>
+    """
+    st.components.v1.html(paste_html_comment, height=90)
+
+    # Camera input as alternative (mobile)
+    comment_camera = st.camera_input("Oder Foto aufnehmen", key="comment_camera")
+
+    # Combine all image sources
+    all_images = list(post_screenshots) if post_screenshots else []
+    if comment_camera:
+        all_images.append(comment_camera)
+
+    if all_images:
+        for img in all_images:
+            st.image(img, caption=getattr(img, 'name', 'Foto'), use_container_width=True, width=300)
 
         if st.button("Kommentare fuer alle generieren", type="primary", use_container_width=True, key="btn_comment_batch"):
             all_batch_results = []
 
-            for idx, screenshot in enumerate(post_screenshots):
+            for idx, screenshot in enumerate(all_images):
                 st.markdown(f"---")
-                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(post_screenshots)}..."):
+                with st.spinner(f"Analysiere Screenshot {idx+1}/{len(all_images)}..."):
                     image_bytes = screenshot.getvalue()
-                    media_type = get_media_type(screenshot.name)
+                    media_type = get_media_type(getattr(screenshot, 'name', 'photo.png'))
 
                     # Use multi-post prompt to catch feed screenshots with multiple posts
                     analysis, error = gemini_request(
