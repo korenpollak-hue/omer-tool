@@ -314,6 +314,94 @@ def parse_post_from_screenshot(analysis_text):
     return result
 
 
+# --- Message Generator (auto-generate if no message in Airtable) ---
+
+FILM_LABOR_CONTEXT = """Film-labor ist eine Filmproduktionsfirma aus Deutschland.
+Was wir machen: B2B-Recruiting-Videos, Image-Filme, Produktvideos.
+Ergebnis bei Kunden: 40% mehr qualifizierte Bewerbungen, professionelle Arbeitgebermarke.
+Pakete: Basic (1 Video, halber Drehtag), Standard (3 Videos, 1 Drehtag), Premium (5+ Videos, 2 Drehtage).
+Branchen-Fokus: Maschinenbau, Chemie, B2B allgemein.
+Tonalitaet: Direkt, ehrlich, keine Corporate-Floskeln. Du-Form auf LinkedIn."""
+
+
+def build_message_prompt(lead_fields):
+    """Build prompt to generate a personalized LinkedIn opener message."""
+    vorname = lead_fields.get("Vorname", "") or lead_fields.get("Name", "").split()[0] if lead_fields.get("Name") else "du"
+    position = lead_fields.get("Position", "")
+    firma = lead_fields.get("Firma", "")
+    branche = lead_fields.get("Branche", "")
+    firma_desc = lead_fields.get("Firmenbeschreibung", "")
+    pains = lead_fields.get("Wie wir helfen koennen", "")
+
+    return f"""Du bist Koren. Du tippst grade schnell eine LinkedIn Nachricht am Handy an {vorname}.
+
+Du bist Filmemacher, hast ne Firma die Recruiting und Imagevideos fuer B2B Kunden produziert. Du hast dich mit {vorname} connected und willst einfach ins Gespraech kommen. KEIN Verkauf.
+
+WAS DU WEISST:
+Position: {position}
+Firma: {firma}
+Branche: {branche}
+Firmeninfo: {firma_desc[:500]}
+Analyse: {pains[:300]}
+
+{FILM_LABOR_CONTEXT}
+
+SCHREIB DIE NACHRICHT JETZT.
+
+WICHTIG - SO TIPPST DU:
+- Max 2-3 saetze. Unter 250 zeichen. Weniger ist mehr.
+- Du tippst am handy. Kurz. Knapp. Wie ne whatsapp nachricht an nen business kontakt.
+- Kleine natuerliche imperfektionen: mal n fehlender punkt am ende, mal "hab" statt "habe", "nem" statt "einem", "grad" statt "gerade"
+- KEINE gedankenstriche. KEINE gaensefuesschen. KEINE perfekte interpunktion.
+- KEINE verschachtelten saetze mit kommas. Wenn du ein komma brauchst mach 2 saetze draus.
+- Eine idee pro nachricht. EINE. Nicht drei.
+- Schreib wie 3. klasse lese-niveau. Einfache worte. Kurze saetze.
+
+WAS DU SAGST:
+- Satz 1: was dir an der firma/person aufgefallen ist (konkret, zeigt dass du geschaut hast)
+- Satz 2: ne frage die sie beantworten WOLLEN weil es ihr thema ist
+
+VERBOTEN (sofort als spam erkannt):
+- "Danke fuers vernetzen" oder "schoen dass wir connected sind"
+- "Ich bin Koren von Film-labor" (weiss er schon)
+- irgendwas mit "wir helfen" oder "wir machen videos"
+- "spannend" "beeindruckt" "freue mich" "ich hoffe" "interessant"
+- gedankenstriche
+- woerter in anfuehrungszeichen setzen
+- termin vorschlagen
+- emojis
+- mehr als 250 zeichen
+
+SO KLINGTS RICHTIG:
+"hey Jo, buefa beliefert ja halb norddeutschland mit chemie rohstoffen. wie erklaert ihr bewerbern eigentlich was ihr genau macht?"
+"Markus, sehe grad ihr sucht 5 leute im engineering. kommen genug gute bewerbungen rein oder isses eher zaeh?"
+
+Gib NUR die nachricht aus. Nix davor nix danach."""
+
+
+def generate_message_for_lead(lead_fields):
+    """Generate a personalized message via Gemini. Returns message text or None."""
+    prompt = build_message_prompt(lead_fields)
+    text, error = gemini_request(prompt, max_tokens=500, temperature=0.8)
+    if error or not text:
+        return None
+    # Clean up quotes
+    text = text.strip()
+    if text.startswith('"') and text.endswith('"'):
+        text = text[1:-1]
+    if text.startswith('\u201e') and text.endswith('\u201c'):
+        text = text[1:-1]
+    return text.strip()
+
+
+def save_message_to_airtable(record_id, message):
+    """Save generated message to Airtable."""
+    update_lead_in_airtable(record_id, {
+        "Personalisierte Nachricht": message,
+        "Nachricht Status": "Entwurf",
+    })
+
+
 # --- Comment Generator ---
 
 def find_lead_by_name(name):
@@ -647,10 +735,29 @@ if page == "Nachrichten senden":
                 continue
 
             if not msg or len(msg) < 5:
+                # Auto-generate message if none exists
+                gen_key = f"gen_{rec_id}"
                 st.markdown(f"""<div class="message-box">
 <div class="lead-name">{i+1}. {name} <span class="skip-badge">KEINE NACHRICHT</span></div>
 <div class="lead-info">{' | '.join(info_parts)}</div>
 </div>""", unsafe_allow_html=True)
+
+                if st.button("Nachricht generieren", key=gen_key, use_container_width=True):
+                    with st.spinner(f"Generiere Nachricht fuer {vorname}..."):
+                        generated = generate_message_for_lead(f)
+                        if generated:
+                            try:
+                                save_message_to_airtable(rec_id, generated)
+                                for m in st.session_state["matched"]:
+                                    if m["record"]["id"] == rec_id:
+                                        m["record"]["fields"]["Personalisierte Nachricht"] = generated
+                                        m["record"]["fields"]["Nachricht Status"] = "Entwurf"
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Speichern fehlgeschlagen: {e}")
+                                st.code(generated, language=None)
+                        else:
+                            st.error("Konnte keine Nachricht generieren. Bitte nochmal versuchen.")
                 continue
 
             st.markdown(f"""<div class="message-box">
